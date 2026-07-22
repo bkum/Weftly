@@ -46,9 +46,21 @@ name: t
 steps:
   - id: hi
     run: echo
-    assert: 1==1
+    http:
+      GET: http://example
 `,
 			wantErr: "exactly one action key, found",
+		},
+		{
+			name: "assert with http is inline (allowed)",
+			src: `
+name: t
+steps:
+  - id: hi
+    http:
+      GET: http://example
+    assert: response.status == 200
+`,
 		},
 		{
 			name: "duplicate id",

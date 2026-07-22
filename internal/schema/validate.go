@@ -37,7 +37,11 @@ func (es Errors) Error() string {
 // ExitCode reports how the CLI should exit when this error escapes.
 func (es Errors) ExitCode() int { return 2 }
 
-var idPattern = regexp.MustCompile(`^[a-z0-9_-]+$`)
+// idPattern accepts letters, digits, and underscore. The spec §5 also lists
+// hyphens, but a hyphenated id (e.g. `resolve-id`) is parsed as subtraction
+// by the expression engine (`steps.resolve - id.outputs.x`) and cannot be
+// referenced. We rejected it here rather than shipping a footgun.
+var idPattern = regexp.MustCompile(`^[a-z0-9_]+$`)
 
 // Validate runs the spec §5 validation rules over a parsed workflow.
 // It returns nil if the workflow is valid, or a non-nil error (typically

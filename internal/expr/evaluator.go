@@ -15,6 +15,7 @@ package expr
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/expr-lang/expr"
@@ -258,6 +259,12 @@ func builtinFuncs() map[string]func(args ...any) (any, error) {
 				return nil, err
 			}
 			return v, nil
+		},
+		"urlquery": func(args ...any) (any, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("urlquery: expected 1 arg")
+			}
+			return url.QueryEscape(stringify(args[0])), nil
 		},
 		"toJSON": func(args ...any) (any, error) {
 			if len(args) != 1 {
