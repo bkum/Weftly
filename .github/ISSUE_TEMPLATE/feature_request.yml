@@ -1,0 +1,50 @@
+name: Feature request
+description: Propose a change to Weftly's scope or surface.
+title: "feat: <short summary>"
+labels: [enhancement, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please skim [`spec.md`](../blob/main/spec.md) §2 (non-goals) before
+        filing. The non-goals list is load-bearing — a proposal that widens
+        Weftly toward CI/CD, multi-format ingestion, or a plugin marketplace
+        will typically be declined.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you solving?
+      description: The situation you're in, not a proposed solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: How would you like Weftly to change?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Especially anything you could do today with `run:` + shell.
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Rough scope
+      options:
+        - Small (a helper, a doc, a new expr function)
+        - Medium (a new action, a new CLI flag)
+        - Large (server mode, DAG parallelism, resume — Phase 2)
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context

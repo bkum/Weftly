@@ -1,0 +1,61 @@
+# See https://goreleaser.com for the full config reference.
+version: 2
+
+project_name: weftly
+
+before:
+  hooks:
+    - go mod tidy
+    - go generate ./...
+
+builds:
+  - id: weftly
+    main: ./cmd/weftly
+    binary: weftly
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      # Windows on arm64 is uncommon for CLI ops tools; drop until asked.
+      - goos: windows
+        goarch: arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/bkum/weftly/internal/cli.Version={{ .Version }}
+      - -X github.com/bkum/weftly/internal/cli.Commit={{ .ShortCommit }}
+      - -X github.com/bkum/weftly/internal/cli.Date={{ .Date }}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+      - LICENSE
+      - NOTICE
+      - CHANGELOG.md
+
+checksum:
+  name_template: 'checksums.txt'
+  algorithm: sha256
+
+snapshot:
+  version_template: '{{ .Tag }}-snapshot-{{ .ShortCommit }}'
+
+changelog:
+  # Draw the release body from GitHub's auto-generated notes so PR titles
+  # and authors are grouped correctly.
+  use: github-native
+
+release:
+  draft: true              # a maintainer flips it to published after eyeballing
+  prerelease: auto         # -rc / -beta tags are marked prerelease automatically
+  mode: replace
+  name_template: '{{ .Tag }}'
