@@ -1,8 +1,9 @@
 package cli
 
 import (
-	"errors"
+	"fmt"
 
+	"github.com/bkum/weftly/internal/schema"
 	"github.com/spf13/cobra"
 )
 
@@ -12,7 +13,15 @@ func newValidateCmd() *cobra.Command {
 		Short: "Static validation, no execution",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return errors.New("validate: not implemented yet (M2)")
+			wf, err := schema.Load(args[0])
+			if err != nil {
+				return err
+			}
+			if err := schema.Validate(wf); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s: ok (%d step(s))\n", args[0], len(wf.Steps))
+			return nil
 		},
 	}
 }
