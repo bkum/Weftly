@@ -5,7 +5,7 @@ process, and the conventions the project follows.
 
 ## Getting set up
 
-Requirements: **Go 1.23+**. No CGO, no external services, no Docker
+Requirements: **Go 1.25+**. No CGO, no external services, no Docker
 required for the build or the test suite.
 
 ```

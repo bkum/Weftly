@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Minimum Go version bumped to 1.25** so the standard library ships
+  with fixes for the CVEs `govulncheck` reports on older toolchains
+  (GO-2026-4946 crypto/x509, GO-2026-4918 net/http HTTP/2, GO-2026-4870
+  crypto/tls KeyUpdate). None of these were in Weftly code; the change
+  is the correct remediation.
+- `run` action: kill the whole process group with SIGKILL on timeout
+  and set `cmd.WaitDelay` so an orphaned grandchild holding an inherited
+  stdio pipe cannot keep the step running past its deadline.
+- CI matrix reduced from (Go 1.23, 1.24) to (Go 1.25.x) to match the
+  new floor; still crosses ubuntu + macos.
+
 ### Added
 
 - Project OSS scaffolding: LICENSE (Apache-2.0), NOTICE, SECURITY.md,

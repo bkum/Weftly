@@ -16,7 +16,7 @@ optional server + UI (`spec.md` §15) are Phase 2.
 
 ## Install / build
 
-Requires Go 1.23+. The build is CGO-free and produces a static binary.
+Requires Go 1.25+. The build is CGO-free and produces a static binary.
 
 ```
 CGO_ENABLED=0 go build -o weftly ./cmd/weftly
