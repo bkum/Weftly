@@ -13,14 +13,15 @@ import (
 
 	"github.com/bkum/weftly/internal/engine"
 	"github.com/bkum/weftly/internal/events"
-	"github.com/bkum/weftly/internal/mocktn"
+	"github.com/bkum/weftly/internal/mockpetclinic"
 	"github.com/bkum/weftly/internal/schema"
 )
 
-// TestFlagshipWorkflowE2E runs examples/b2b-getting-started.yml against an
-// in-process mock TN server, exercising every core mechanism named in the
-// spec's DoD: declarative http, idempotent `if:`, http→run/jq handoff,
-// env-var-safe secret passing, template rendering, summary, and upload.
+// TestFlagshipWorkflowE2E runs examples/petclinic-onboarding.yml against
+// an in-process mock server. It exercises every core mechanism named in
+// the spec's DoD: declarative http, idempotent `if:`, http→run/jq
+// handoff, env-var-safe secret passing, template rendering, summary, and
+// upload — against a generic REST shape rather than a proprietary one.
 func TestFlagshipWorkflowE2E(t *testing.T) {
 	for _, tool := range []string{"curl", "jq"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -28,12 +29,11 @@ func TestFlagshipWorkflowE2E(t *testing.T) {
 		}
 	}
 
-	token := "test-token-value-abcdef"
-	srv := mocktn.New(token)
+	apiKey := "test-api-key-value-abcdef"
+	srv := mockpetclinic.New(apiKey)
 	defer srv.Close()
 
-	// resolve examples/b2b-getting-started.yml relative to this file
-	wfPath := filepath.Join("..", "..", "examples", "b2b-getting-started.yml")
+	wfPath := filepath.Join("..", "..", "examples", "petclinic-onboarding.yml")
 	wf, err := schema.Load(wfPath)
 	if err != nil {
 		t.Fatalf("load: %v", err)
@@ -42,8 +42,6 @@ func TestFlagshipWorkflowE2E(t *testing.T) {
 		t.Fatalf("validate: %v", err)
 	}
 
-	// Isolate run state to a per-test dir; keep it around on failure for
-	// inspection.
 	baseDir := t.TempDir()
 
 	bus := events.NewBus()
@@ -64,9 +62,9 @@ func TestFlagshipWorkflowE2E(t *testing.T) {
 	res, err := engine.Run(context.Background(), wf, engine.Options{
 		BaseDir: baseDir,
 		Inputs: map[string]any{
-			"env_url":      srv.URL,
-			"api_token":    token,
-			"partner_name": "Acme Corp",
+			"env_url":    srv.URL,
+			"api_key":    apiKey,
+			"owner_last": "Doe",
 		},
 		Bus: bus,
 	})
@@ -77,32 +75,39 @@ func TestFlagshipWorkflowE2E(t *testing.T) {
 		t.Fatalf("expected success, got %s\nlogs:\n%s", res.Status, strings.Join(logs, "\n"))
 	}
 
-	// Token must never appear in any log line.
+	// The api_key must never appear in any log line.
 	for _, l := range logs {
-		if strings.Contains(l, token) {
-			t.Fatalf("secret token leaked into log: %q", l)
+		if strings.Contains(l, apiKey) {
+			t.Fatalf("secret api_key leaked into log: %q", l)
 		}
 	}
 
-	// The report and artifact are present.
-	report := filepath.Join(res.StateFile[:len(res.StateFile)-len("state.json")], "report.html")
+	runDir := strings.TrimSuffix(res.StateFile, "state.json")
+	report := filepath.Join(runDir, "report.html")
 	if _, err := os.Stat(report); err != nil {
 		t.Errorf("report not written: %v", err)
 	}
-	artifact := filepath.Join(res.StateFile[:len(res.StateFile)-len("state.json")], "artifacts", "onboarding-report.html")
+	artifact := filepath.Join(runDir, "artifacts", "onboarding-report.html")
 	if _, err := os.Stat(artifact); err != nil {
 		t.Errorf("artifact not copied: %v", err)
 	}
-	body, err := os.ReadFile(artifact)
-	if err == nil && !strings.Contains(string(body), "Acme Corp") {
-		t.Errorf("artifact body missing partner name: %q", string(body[:min(200, len(body))]))
+	if body, err := os.ReadFile(artifact); err == nil {
+		if !strings.Contains(string(body), "Jane Doe") {
+			t.Errorf("artifact body missing owner: %q", string(body[:min(200, len(body))]))
+		}
+		if !strings.Contains(string(body), "Rex") {
+			t.Errorf("artifact body missing pet: %q", string(body[:min(200, len(body))]))
+		}
 	}
 
-	// Server state: exactly one partner + one document produced.
-	if got := srv.Partners(); len(got) != 1 || got[0].Name != "Acme Corp" {
-		t.Errorf("expected 1 partner 'Acme Corp', got %+v", got)
+	// Server state: exactly one owner + one pet + one visit produced.
+	if got := srv.Owners(); len(got) != 1 || got[0].LastName != "Doe" {
+		t.Errorf("expected 1 owner 'Doe', got %+v", got)
 	}
-	if got := srv.Documents(); len(got) != 1 {
-		t.Errorf("expected 1 document, got %+v", got)
+	if got := srv.Pets(); len(got) != 1 {
+		t.Errorf("expected 1 pet, got %+v", got)
+	}
+	if got := srv.Visits(); len(got) != 1 {
+		t.Errorf("expected 1 visit, got %+v", got)
 	}
 }

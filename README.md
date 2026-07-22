@@ -28,20 +28,19 @@ CGO_ENABLED=0 go build -o weftly ./cmd/weftly
 Validate a workflow without running it:
 
 ```
-weftly validate examples/b2b-getting-started.yml
+weftly validate examples/petclinic-onboarding.yml
 ```
 
-Run the flagship example against your own Trading Networks environment
-(or any REST endpoint that speaks the same shape):
+Run the flagship example against any [Spring PetClinic REST](https://github.com/spring-petclinic/spring-petclinic-rest)-shaped endpoint:
 
 ```
-weftly run examples/b2b-getting-started.yml \
-  --input env_url=https://tn.example.com \
-  --input api_token=$TN_TOKEN \
-  --input partner_name="Acme Corp"
+weftly run examples/petclinic-onboarding.yml \
+  --input env_url=http://localhost:9966/petclinic \
+  --input api_key=$PETCLINIC_KEY \
+  --input owner_last=Doe
 ```
 
-The token is registered as a secret and masked in every log line and
+The api key is registered as a secret and masked in every log line and
 persisted state file. Run outputs land under `./.weftly/runs/<run-id>/`:
 
 ```
@@ -160,9 +159,9 @@ Exit codes: `0` success, `1` a step failed, `2` validation error,
 go test ./...
 ```
 
-The flagship end-to-end test spins up an in-process mock Trading
-Networks server (`internal/mocktn`) and executes
-`examples/b2b-getting-started.yml` against it. It skips automatically if
+The flagship end-to-end test spins up an in-process mock PetClinic
+server (`internal/mockpetclinic`) and executes
+`examples/petclinic-onboarding.yml` against it. It skips automatically if
 `curl` or `jq` isn't on `PATH`.
 
 ## Design
