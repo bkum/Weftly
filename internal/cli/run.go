@@ -105,6 +105,9 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if !jsonOutput {
+				fmt.Fprintf(cmd.OutOrStdout(), "\nstate:  %s\nreport: %s\n", res.StateFile, res.ReportFile)
+			}
 			if code := res.ExitCode(); code != 0 {
 				os.Exit(code)
 			}

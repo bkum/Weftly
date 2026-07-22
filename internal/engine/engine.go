@@ -20,8 +20,10 @@ import (
 	"github.com/bkum/weftly/internal/events"
 	"github.com/bkum/weftly/internal/expr"
 	"github.com/bkum/weftly/internal/ir"
+	"github.com/bkum/weftly/internal/report"
 	"github.com/bkum/weftly/internal/schema"
 	"github.com/bkum/weftly/internal/secrets"
+	"github.com/bkum/weftly/internal/state"
 	"github.com/bkum/weftly/internal/workspace"
 )
 
@@ -36,9 +38,11 @@ type Options struct {
 
 // Result summarises a completed run.
 type Result struct {
-	RunID    string
-	Status   events.Status
-	Duration time.Duration
+	RunID      string
+	Status     events.Status
+	Duration   time.Duration
+	StateFile  string
+	ReportFile string
 }
 
 // ExitCode maps a Result to the CLI's exit code convention.
@@ -76,6 +80,12 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 			sec.Register(s)
 		}
 	}
+
+	// State + report writers subscribe to the same bus every renderer sees.
+	sw := state.New(ws.Root, sec)
+	rep := report.New(sec)
+	bus.Subscribe(sw.Handle)
+	bus.Subscribe(rep.Handle)
 
 	// Preflight: check `requires:` tools are on PATH.
 	if err := checkRequires(wf.Requires); err != nil {
@@ -125,7 +135,20 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 
 	dur := time.Since(runStart)
 	bus.Publish(events.RunFinished{Status: overallStatus, Duration: dur})
-	return Result{RunID: runID, Status: overallStatus, Duration: dur}, nil
+
+	// state.json is flushed on every event by sw.Handle; report.html is a
+	// terminal render.
+	reportPath := ws.Root + "/report.html"
+	if err := rep.Write(reportPath); err != nil {
+		bus.Publish(events.StepLog{Stream: events.Info, Line: "report: " + err.Error()})
+	}
+	return Result{
+		RunID:      runID,
+		Status:     overallStatus,
+		Duration:   dur,
+		StateFile:  sw.Path,
+		ReportFile: reportPath,
+	}, nil
 }
 
 type runCtx struct {
