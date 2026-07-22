@@ -38,11 +38,13 @@ type StepContext struct {
 	Action   string     // action type key
 	Config   StepConfig // raw yaml for this action
 
-	Inputs  map[string]any
-	Steps   map[string]expr.StepView
-	Env     map[string]string
-	Secrets *secrets.Registry
-	Workdir string
+	Inputs       map[string]any
+	Steps        map[string]expr.StepView
+	Env          map[string]string
+	Secrets      *secrets.Registry
+	Workdir      string   // per-run workspace (step cwd)
+	ArtifactsDir string   // per-run artifacts destination
+	ExprEnv      expr.Env // pre-built evaluation env for this step
 
 	Emit func(events.Event)
 	Expr *expr.Evaluator
@@ -50,10 +52,24 @@ type StepContext struct {
 	Shell   string        // default shell (overridden per-step if set)
 	Timeout time.Duration // per-step timeout; 0 = none
 	Strict  bool          // --strict: inline ${{ }} in run: bodies is an error
+
+	// HTTPDefaults are workflow-level http defaults merged into every http
+	// action call. Populated by the engine from schema.Defaults.HTTP.
+	HTTPTimeout time.Duration
+	HTTPHeaders map[string]string
+
+	// Response is a slot the http action fills in before returning so that
+	// the engine's post-Run outputs mapping (`outputs: { id: "${{ response.
+	// body.partnerId }}" }`) can see it. Other actions leave it nil.
+	Response any
 }
 
-// Log is a convenience for emitting a StepLog line.
+// Log is a convenience for emitting a StepLog line. A nil Emit (e.g. in a
+// test without a bus) is silently dropped.
 func (sc *StepContext) Log(stream events.Stream, line string) {
+	if sc.Emit == nil {
+		return
+	}
 	sc.Emit(events.StepLog{StepID: sc.StepID, Stream: stream, Line: line})
 }
 

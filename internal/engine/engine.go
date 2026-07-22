@@ -102,9 +102,6 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 	overallStatus := events.Success
 
 	defaultShell := wf.Defaults.Shell
-	if defaultShell == "" {
-		defaultShell = ""
-	}
 
 	for _, node := range graph.Order {
 		status := runStep(ctx, node, runCtx{
@@ -113,17 +110,15 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 			Secrets:      sec,
 			Env:          baseEnv,
 			Steps:        stepViews,
-			Workdir:      ws.StepsDir,
+			Workspace:    ws,
 			Bus:          bus,
 			Expr:         ev,
 			DefaultShell: defaultShell,
 			Strict:       opts.Strict,
 			RunID:        runID,
 		})
-		// The runStep returns the terminal status; view is already updated.
 		if status == events.Failed || status == events.TimedOut {
 			overallStatus = events.Failed
-			// halt subsequent steps
 			break
 		}
 	}
@@ -139,7 +134,7 @@ type runCtx struct {
 	Secrets      *secrets.Registry
 	Env          map[string]string
 	Steps        map[string]expr.StepView
-	Workdir      string
+	Workspace    *workspace.Workspace
 	Bus          *events.Bus
 	Expr         *expr.Evaluator
 	DefaultShell string
@@ -155,7 +150,7 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 		Steps:   rc.Steps,
 		Env:     rc.Env,
 		Secrets: map[string]string{}, // secrets exposed as-is to expressions; renderer masks output
-		Run:     expr.RunMeta{ID: rc.RunID, Workspace: rc.Workdir},
+		Run:     expr.RunMeta{ID: rc.RunID, Workspace: rc.Workspace.StepsDir},
 	}
 	// Give expressions access to secrets by name too.
 	for _, name := range secretNames(rc.Workflow) {
@@ -212,20 +207,24 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 	}
 
 	sc := &actions.StepContext{
-		StepID:   node.ID,
-		StepName: node.Name,
-		Action:   node.Action,
-		Config:   node.Config.ActionNode,
-		Inputs:   rc.Inputs,
-		Steps:    rc.Steps,
-		Env:      resolvedEnv,
-		Secrets:  rc.Secrets,
-		Workdir:  rc.Workdir,
-		Emit:     rc.Bus.Publish,
-		Expr:     rc.Expr,
-		Shell:    shell,
-		Timeout:  node.Timeout,
-		Strict:   rc.Strict,
+		StepID:       node.ID,
+		StepName:     node.Name,
+		Action:       node.Action,
+		Config:       node.Config.ActionNode,
+		Inputs:       rc.Inputs,
+		Steps:        rc.Steps,
+		Env:          resolvedEnv,
+		Secrets:      rc.Secrets,
+		Workdir:      rc.Workspace.StepsDir,
+		ArtifactsDir: rc.Workspace.ArtifactsDir,
+		ExprEnv:      envForExpr,
+		Emit:         rc.Bus.Publish,
+		Expr:         rc.Expr,
+		Shell:        shell,
+		Timeout:      node.Timeout,
+		Strict:       rc.Strict,
+		HTTPTimeout:  rc.Workflow.Defaults.HTTP.Timeout,
+		HTTPHeaders:  rc.Workflow.Defaults.HTTP.Headers,
 	}
 
 	rc.Bus.Publish(events.StepStarted{StepID: node.ID, Name: node.Name, Action: node.Action})
@@ -257,15 +256,18 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 		return events.Failed
 	}
 
-	// Merge in step-declared outputs (http/template outputs mapping).
+	// Merge in step-declared outputs (http/template outputs mapping). If the
+	// action populated sc.Response (http does), include it in the eval env.
 	if len(node.OutputsMap) > 0 {
 		if outs == nil {
 			outs = actions.Outputs{}
 		}
+		outEnv := envForExpr
+		if sc.Response != nil {
+			outEnv.Response = sc.Response
+		}
 		for k, expression := range node.OutputsMap {
-			// action may have populated a `response` object in Steps map
-			// via a sentinel entry. We handle that in the action itself.
-			v, err := rc.Expr.Interpolate(expression, envForExpr)
+			v, err := rc.Expr.Interpolate(expression, outEnv)
 			if err != nil {
 				rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.Failed, Duration: dur, Err: fmt.Errorf("outputs.%s: %w", k, err)})
 				rc.Steps[node.ID] = expr.StepView{Status: string(events.Failed), Outputs: map[string]any{}}
