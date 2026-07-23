@@ -2,54 +2,15 @@ package server
 
 import (
 	"context"
-	"crypto/subtle"
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 )
 
-// Authenticator decides whether a request is allowed. Returning "" from
-// Principal grants anonymous access (used when no token is configured);
-// returning a non-empty principal identifies the caller for logging.
-type Authenticator interface {
-	Principal(r *http.Request) (principal string, ok bool)
-}
-
-// BearerToken accepts requests carrying `Authorization: Bearer <token>`
-// where <token> matches the configured value exactly (constant-time
-// compare). An empty configured token disables enforcement — every
-// request passes with principal "anon".
-type bearerToken string
-
-func BearerToken(token string) Authenticator { return bearerToken(token) }
-
-func (b bearerToken) Principal(r *http.Request) (string, bool) {
-	if b == "" {
-		return "anon", true
-	}
-	got := ""
-	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
-		got = strings.TrimPrefix(h, "Bearer ")
-	} else if q := r.URL.Query().Get("token"); q != "" {
-		// EventSource in the browser cannot set custom headers, so the SPA
-		// falls back to ?token=... on SSE URLs. Anything else should keep
-		// using the header for cleanliness — but we accept both uniformly
-		// so the auth surface is one code path.
-		got = q
-	}
-	if got == "" {
-		return "", false
-	}
-	if subtle.ConstantTimeCompare([]byte(got), []byte(b)) != 1 {
-		return "", false
-	}
-	return "bearer", true
-}
-
 // withAuth wraps h with bearer-token enforcement. Paths in `exempt` bypass
-// the check (used for /healthz so external probes work).
+// the check (used for /healthz and the SPA shell so external probes and
+// initial page loads work).
 func withAuth(h http.Handler, a Authenticator, log *slog.Logger, exempt ...string) http.Handler {
 	exemptSet := map[string]bool{}
 	for _, p := range exempt {
@@ -60,7 +21,7 @@ func withAuth(h http.Handler, a Authenticator, log *slog.Logger, exempt ...strin
 			h.ServeHTTP(w, r)
 			return
 		}
-		principal, ok := a.Principal(r)
+		principal, ok := a.Authenticate(r)
 		if !ok {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="weftly"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -96,7 +57,7 @@ func withAccessLog(h http.Handler, log *slog.Logger) http.Handler {
 			"status", lw.status,
 			"bytes", lw.bytes,
 			"duration_ms", time.Since(start).Milliseconds(),
-			"principal", principalFromContext(r.Context()),
+			"principal", principalNameFromContext(r.Context()),
 		)
 	})
 }
@@ -111,9 +72,6 @@ func sanitizeForLog(s string) string {
 	if len(s) > maxLen {
 		s = s[:maxLen] + "…(truncated)"
 	}
-	// strconv.Quote returns a Go-quoted string with \x escapes for
-	// control chars, so a `\n` in s becomes the literal two characters
-	// `\` + `n` — no way to fake a log entry.
 	return strconv.Quote(s)
 }
 
@@ -144,13 +102,20 @@ type ctxKey int
 
 const principalKey ctxKey = 1
 
-func withPrincipal(ctx context.Context, principal string) context.Context {
-	return context.WithValue(ctx, principalKey, principal)
+func withPrincipal(ctx context.Context, p Principal) context.Context {
+	return context.WithValue(ctx, principalKey, p)
 }
 
-func principalFromContext(ctx context.Context) string {
-	if v, ok := ctx.Value(principalKey).(string); ok {
+// PrincipalFromContext returns the resolved caller identity, or a zero
+// Principal if no authentication ran (in-process test harness, for
+// example). Handlers should treat the zero value as anonymous.
+func PrincipalFromContext(ctx context.Context) Principal {
+	if v, ok := ctx.Value(principalKey).(Principal); ok {
 		return v
 	}
-	return ""
+	return Principal{}
+}
+
+func principalNameFromContext(ctx context.Context) string {
+	return PrincipalFromContext(ctx).Name
 }

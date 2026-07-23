@@ -35,9 +35,17 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"workflows": s.cat.list(),
-	})
+	p := PrincipalFromContext(r.Context())
+	all := s.cat.list()
+	// Hide workflows the caller can't run — better UX than 404-ing them
+	// only on click.
+	visible := make([]*catalogueEntry, 0, len(all))
+	for _, e := range all {
+		if p.CanRunWorkflow(e.ID) {
+			visible = append(visible, e)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"workflows": visible})
 }
 
 func (s *Server) handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -47,18 +55,42 @@ func (s *Server) handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "unknown workflow")
 		return
 	}
+	if !PrincipalFromContext(r.Context()).CanRunWorkflow(id) {
+		writeError(w, http.StatusForbidden, "workflow not accessible to this principal")
+		return
+	}
 	writeJSON(w, http.StatusOK, entry)
 }
 
 // handleReload re-scans the catalogue directory and swaps the in-memory
 // catalogue on success. Same handler as SIGHUP on unix (see server.go).
+// Admin-only when RBAC is enabled.
 func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
+	if !PrincipalFromContext(r.Context()).Admin {
+		writeError(w, http.StatusForbidden, "admin only")
+		return
+	}
 	if err := s.cat.reload(s.cfg.CatalogueDir); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	s.log.Info("catalogue reloaded", "workflows", len(s.cat.list()))
 	writeJSON(w, http.StatusOK, map[string]any{"reloaded": true, "workflows": len(s.cat.list())})
+}
+
+// runVisibleTo reports whether the principal may access the given run —
+// true if its workflow is in the principal's allowlist. Loads the run's
+// state.json to discover the workflow id (cheap; already on disk).
+func (s *Server) runVisibleTo(runID string, p Principal) bool {
+	if p.Admin || p.AllWorkflows {
+		return true
+	}
+	prior, _, err := state.Load(filepath.Join(s.cfg.RunsDir, "runs"), runID)
+	if err != nil || prior == nil {
+		// If we can't identify the run's workflow, deny by default.
+		return false
+	}
+	return p.CanRunWorkflow(prior.Workflow)
 }
 
 type createRunReq struct {
@@ -85,6 +117,10 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "unknown workflow: "+req.Workflow)
 		return
 	}
+	if !PrincipalFromContext(r.Context()).CanRunWorkflow(req.Workflow) {
+		writeError(w, http.StatusForbidden, "workflow not accessible to this principal")
+		return
+	}
 	rec, err := s.runs.start(r.Context(), req.Workflow, entry.Workflow, req.Inputs)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -103,6 +139,7 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	p := PrincipalFromContext(r.Context())
 	if wf := r.URL.Query().Get("workflow"); wf != "" {
 		filtered := all[:0]
 		for _, r := range all {
@@ -112,7 +149,14 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		}
 		all = filtered
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"runs": all})
+	// Hide runs whose workflow the caller can't access. Never leak names.
+	visible := make([]state.RunSummary, 0, len(all))
+	for _, run := range all {
+		if p.CanRunWorkflow(run.Workflow) {
+			visible = append(visible, run)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": visible})
 }
 
 func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
