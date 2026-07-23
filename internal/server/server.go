@@ -13,6 +13,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 )
 
@@ -98,6 +100,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /runs/{id}", s.handleGetRun)
 	mux.HandleFunc("GET /runs/{id}/events", s.handleRunEvents)
 	mux.HandleFunc("GET /runs/{id}/artifacts/{name}", s.handleArtifact)
+	mux.HandleFunc("POST /reload", s.handleReload)
 	// UI (unauthenticated shell; the SPA does authenticated API calls)
 	ui := uiHandler()
 	mux.Handle("GET /", ui)
@@ -129,6 +132,20 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		IdleTimeout:       60 * time.Second,
 	}
 	s.log.Info("server listening", "addr", l.Addr().String(), "catalogue", s.cfg.CatalogueDir, "workflows", len(s.cat.list()))
+
+	// SIGHUP reloads the catalogue in place (same as POST /reload).
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	go func() {
+		for range hup {
+			if err := s.cat.reload(s.cfg.CatalogueDir); err != nil {
+				s.log.Error("SIGHUP reload failed", "err", err)
+				continue
+			}
+			s.log.Info("SIGHUP reload", "workflows", len(s.cat.list()))
+		}
+	}()
+	defer signal.Stop(hup)
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- s.srv.Serve(l) }()

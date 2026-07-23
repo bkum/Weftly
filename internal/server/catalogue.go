@@ -80,3 +80,18 @@ func (c *catalogue) get(id string) *catalogueEntry {
 	defer c.mu.RUnlock()
 	return c.byID[id]
 }
+
+// reload swaps the in-memory catalogue for a freshly-loaded one. A
+// parse/validate failure on any workflow leaves the existing catalogue
+// untouched — better to serve slightly-stale but valid content than to
+// go dark on a bad edit.
+func (c *catalogue) reload(dir string) error {
+	fresh, err := loadCatalogue(dir)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.byID = fresh.byID
+	c.mu.Unlock()
+	return nil
+}

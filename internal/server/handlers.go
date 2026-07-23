@@ -49,6 +49,17 @@ func (s *Server) handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, entry)
 }
 
+// handleReload re-scans the catalogue directory and swaps the in-memory
+// catalogue on success. Same handler as SIGHUP on unix (see server.go).
+func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
+	if err := s.cat.reload(s.cfg.CatalogueDir); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.log.Info("catalogue reloaded", "workflows", len(s.cat.list()))
+	writeJSON(w, http.StatusOK, map[string]any{"reloaded": true, "workflows": len(s.cat.list())})
+}
+
 type createRunReq struct {
 	Workflow string         `json:"workflow"`
 	Inputs   map[string]any `json:"inputs"`
