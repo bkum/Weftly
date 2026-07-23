@@ -167,6 +167,46 @@ async function renderForm(id) {
     fields.appendChild(wrap);
   }
 
+  // Recent-runs strip below the form.
+  try {
+    const rr = await api("/runs?workflow=" + encodeURIComponent(id));
+    if (rr.ok) {
+      const { runs } = await rr.json();
+      if (runs && runs.length) {
+        const strip = document.createElement("div");
+        strip.style.marginTop = "24px";
+        strip.style.borderTop = "1px solid var(--border)";
+        strip.style.paddingTop = "16px";
+        const label = document.createElement("div");
+        label.className = "wf-sub";
+        label.style.marginBottom = "8px";
+        label.textContent = "Recent runs of this workflow";
+        strip.appendChild(label);
+        for (const run of runs.slice(0, 5)) {
+          const a = document.createElement("a");
+          a.href = "#/runs/" + encodeURIComponent(run.run_id);
+          a.className = "wf-history-item";
+          a.style.marginTop = "6px";
+          const b = document.createElement("span");
+          b.className = "wf-badge " + (run.status || "pending");
+          b.textContent = run.status || "pending";
+          const t = document.createElement("span");
+          t.className = "id";
+          t.textContent = run.run_id;
+          const when = document.createElement("span");
+          when.className = "id";
+          when.style.marginLeft = "auto";
+          when.textContent = new Date(run.started_at).toLocaleString();
+          a.appendChild(b);
+          a.appendChild(t);
+          a.appendChild(when);
+          strip.appendChild(a);
+        }
+        page.appendChild(strip);
+      }
+    }
+  } catch (_) {}
+
   const status = page.querySelector('[data-role="status"]');
   const submit = page.querySelector('[data-role="submit"]');
   submit.addEventListener("click", async () => {
@@ -338,13 +378,43 @@ async function renderHistory() {
   const page = el("tmpl-history");
   main.appendChild(page);
   const list = page.querySelector('[data-role="list"]');
-  // No dedicated /runs listing endpoint yet — Phase 3. For now the view
-  // reminds the user how to reach a run directly.
-  const empty = document.createElement("div");
-  empty.className = "wf-sub";
-  empty.textContent =
-    "Run history browsing is a Phase 3 feature. Runs remain accessible at #/runs/<run-id> and on disk under ./.weftly/runs/.";
-  list.appendChild(empty);
+  try {
+    const r = await api("/runs");
+    if (!r.ok) throw new Error(await r.text());
+    const { runs } = await r.json();
+    if (!runs || !runs.length) {
+      const empty = document.createElement("div");
+      empty.className = "wf-sub";
+      empty.textContent = "No runs yet — pick a runbook from the Catalogue.";
+      list.appendChild(empty);
+      return;
+    }
+    for (const run of runs) {
+      const row = document.createElement("a");
+      row.href = "#/runs/" + encodeURIComponent(run.run_id);
+      row.className = "wf-history-item";
+      const status = document.createElement("span");
+      status.className = "wf-badge " + (run.status || "pending");
+      status.textContent = run.status || "pending";
+      const wf = document.createElement("span");
+      wf.style.fontWeight = "500";
+      wf.textContent = run.workflow || "(unknown)";
+      const id = document.createElement("span");
+      id.className = "id";
+      id.textContent = run.run_id;
+      const when = document.createElement("span");
+      when.className = "id";
+      when.style.marginLeft = "auto";
+      when.textContent = new Date(run.started_at).toLocaleString();
+      row.appendChild(status);
+      row.appendChild(wf);
+      row.appendChild(id);
+      row.appendChild(when);
+      list.appendChild(row);
+    }
+  } catch (e) {
+    list.textContent = "Error loading history: " + e.message;
+  }
 }
 
 // bootstrap
