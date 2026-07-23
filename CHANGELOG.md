@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Phase 2
+
+- **`prompt` action** replaces the Phase 1 stub. Supports `text`,
+  `password`, `confirm`, and `select` types; TTY detection via
+  `x/term`; passwords read without echo; `--yes` / `-y` auto-answers
+  every `type: confirm` prompt for CI-style unattended runs;
+  non-interactive sessions use `default:` or fail fast.
+- **DAG scheduler with `needs` and bounded parallelism.** Steps
+  without `needs:` still chain to the previous named step (GHA-style)
+  so existing workflows keep their order. Declaring `needs:` opts
+  into parallelism. `--parallel N` (default 4) caps concurrency.
+  Cascade-skip propagates through a fatal step's dependents.
+- **`--resume <run-id>`.** Reloads state.json, skips previously-
+  successful steps, and re-emits their events (marked
+  `resumed: true`) so the renderer + report stay coherent. Downstream
+  steps see the cached outputs exactly as they would on a fresh run.
+- **Server mode.** `weftly server` starts a REST + SSE + embedded-SPA
+  front-end backed by a curated catalogue directory. Endpoints:
+  `GET /workflows`, `GET /workflows/{id}`, `POST /runs`,
+  `GET /runs/{id}`, `GET /runs/{id}/events` (SSE),
+  `GET /runs/{id}/artifacts/{name}`, `POST /reload` (SIGHUP too).
+  Bearer-token auth via `Authorization` header or `?token=` (for
+  EventSource); constant-time compare; body cap; structured access
+  log. Catalogue-only enforcement keeps the trust boundary at
+  "who commits to the catalogue" (spec §16).
+- **Embedded SPA** at `/`, styled to the Loom design mockup (dark
+  oklch palette, IBM Plex font stack with system fallback). Vanilla
+  ES module, no build step. Views: catalogue with search, workflow
+  form generated from `inputs:` schema, live-run view with expandable
+  per-step logs and connection-lost banner, history placeholder.
+- **TTY renderer** disambiguates parallel step output by prefixing
+  log lines with `[step-id]` whenever more than one step is in flight;
+  single-active runs stay uncluttered.
+
 ### Changed
 
 - **Minimum Go version bumped to 1.25** so the standard library ships

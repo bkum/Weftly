@@ -144,14 +144,61 @@ weftly run <workflow.yml> [flags]      Execute a workflow (default verb)
   --json                 emit the event stream as JSON
   --no-color             plain output
   --strict               inline ${{ }} in run: bodies is an error
+  -y, --yes              auto-answer 'yes' to every prompt(type:confirm)
+  -p, --parallel N       max concurrent steps (default 4; needs edges honored)
+      --resume <run-id>  resume a prior run; skips successful steps and
+                         replays their outputs into downstream steps
 
 weftly validate <workflow.yml>         Static validation, no execution
 weftly list                            Discover workflows in ./workflows
+weftly server                          Start the REST + SSE + UI server
+  --addr :8080           listen address
+  --dir  ./workflows     catalogue directory (only these workflows run)
+  --runs-dir ./.weftly   parent directory for per-run state
+  --token ...            bearer token (or $WEFTLY_TOKEN)
 weftly version
 ```
 
 Exit codes: `0` success, `1` a step failed, `2` validation error,
 `3` input resolution error.
+
+## Server + UI (Phase 2)
+
+`weftly server` starts a small self-contained HTTP server that catalogues
+workflows from a directory, runs them on request, and streams live logs
+to a built-in SPA. The trust boundary is *"who commits to the
+catalogue"* — no arbitrary YAML is ever accepted over the wire (spec
+§16).
+
+```
+mkdir -p ./workflows
+cp examples/petclinic-onboarding.yml ./workflows/
+export WEFTLY_TOKEN=$(head -c 32 /dev/urandom | base64)
+weftly server --dir ./workflows --addr :8080
+```
+
+Open http://localhost:8080/ — the SPA prompts for the token on first
+API call and stashes it in `localStorage`. Curl-only usage works too:
+
+```
+curl -sH "Authorization: Bearer $WEFTLY_TOKEN" http://localhost:8080/workflows | jq
+curl -sH "Authorization: Bearer $WEFTLY_TOKEN" -H "Content-Type: application/json" \
+     -d '{"workflow":"petclinic-onboarding","inputs":{"env_url":"...","api_key":"..."}}' \
+     http://localhost:8080/runs
+```
+
+Endpoints:
+
+| Method + path | Purpose |
+|---|---|
+| `GET /healthz` | Liveness (unauthenticated) |
+| `GET /workflows` | Catalogue list |
+| `GET /workflows/{id}` | Full metadata + inputs schema |
+| `POST /runs` | Start a run (`{workflow, inputs}` body) |
+| `GET /runs/{id}` | Serve the run's `state.json` |
+| `GET /runs/{id}/events` | SSE event stream (replay + live) |
+| `GET /runs/{id}/artifacts/{name}` | Download a collected artifact |
+| `POST /reload` | Re-scan the catalogue (SIGHUP does the same) |
 
 ## Testing
 
