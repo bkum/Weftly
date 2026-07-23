@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bkum/weftly/internal/artifacts"
 	"github.com/bkum/weftly/internal/events"
 	"github.com/bkum/weftly/internal/state"
 	"github.com/bkum/weftly/internal/workspace"
@@ -260,21 +262,52 @@ func (s *Server) handleArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f, err := os.Open(full)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+	if err == nil {
+		defer f.Close()
+		stat, err := f.Stat()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		http.ServeContent(w, r, filepath.Base(full), stat.ModTime(), f)
+		return
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// Local miss → fall back to remote store if configured. The upload
+	// action mirrors artifacts to it, so the file is likely there even
+	// if local retention pruned this run's dir.
+	if s.store != nil {
+		key := id + "/" + name
+		info, serr := s.store.Stat(r.Context(), key)
+		if serr == nil {
+			rc, _, gerr := s.store.Get(r.Context(), key)
+			if gerr == nil {
+				defer rc.Close()
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size))
+				http.ServeContent(w, r, name, info.LastModified, readSeekerAdapter(rc, info.Size))
+				return
+			}
+		}
+		if errors.Is(serr, artifacts.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "artifact not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
 	}
-	defer f.Close()
-	stat, err := f.Stat()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+	writeError(w, http.StatusNotFound, "artifact not found")
+}
+
+// readSeekerAdapter turns a plain ReadCloser into an io.ReadSeeker for
+// http.ServeContent. For streams that don't support Seek we buffer to
+// memory; artifacts are typically small enough for this to be fine.
+func readSeekerAdapter(rc io.ReadCloser, _ int64) io.ReadSeeker {
+	if rs, ok := rc.(io.ReadSeeker); ok {
+		return rs
 	}
-	http.ServeContent(w, r, filepath.Base(full), stat.ModTime(), f)
+	buf, _ := io.ReadAll(rc)
+	return bytes.NewReader(buf)
 }
 
 func eventTypeName(e events.Event) string {

@@ -8,8 +8,7 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/bkum/weftly/internal/actions" // register built-ins
-
+	"github.com/bkum/weftly/internal/actions"
 	"github.com/bkum/weftly/internal/engine"
 	"github.com/bkum/weftly/internal/events"
 	"github.com/bkum/weftly/internal/schema"
@@ -105,13 +104,14 @@ func (r *runRecord) subscribe() ([]events.Event, <-chan events.Event) {
 type runManager struct {
 	baseDir string
 	log     *slog.Logger
+	store   actions.RemoteArtifactStore // may be nil
 
 	mu   sync.RWMutex
 	runs map[string]*runRecord
 }
 
-func newRunManager(baseDir string, log *slog.Logger) *runManager {
-	return &runManager{baseDir: baseDir, log: log, runs: map[string]*runRecord{}}
+func newRunManager(baseDir string, log *slog.Logger, store actions.RemoteArtifactStore) *runManager {
+	return &runManager{baseDir: baseDir, log: log, store: store, runs: map[string]*runRecord{}}
 }
 
 // start dispatches a workflow into a fresh run and returns its record.
@@ -138,9 +138,10 @@ func (m *runManager) start(_ context.Context, wfID string, wf *schema.Workflow, 
 	errCh := make(chan error, 1)
 	go func() {
 		_, err := engine.Run(context.Background(), wf, engine.Options{
-			BaseDir: m.baseDir,
-			Inputs:  inputs,
-			Bus:     bus,
+			BaseDir:       m.baseDir,
+			Inputs:        inputs,
+			Bus:           bus,
+			ArtifactStore: m.store,
 		})
 		errCh <- err
 		// Only NOW is it safe to close SSE waiters: engine.Run has

@@ -84,10 +84,35 @@ func (uploadAction) Run(_ context.Context, sc *StepContext) (Outputs, error) {
 		if err := copyFile(m, dst); err != nil {
 			return nil, err
 		}
+		// Mirror to the configured remote store (server-mode deployments).
+		// The local copy is authoritative for report embedding; a remote
+		// mirror failure logs and continues rather than failing the run —
+		// the artifact is still available on disk.
+		if sc.ArtifactStore != nil {
+			if err := mirrorToStore(sc, dst, fi.Size()); err != nil {
+				sc.Log(events.Info, fmt.Sprintf("artifact store: mirror of %s failed: %v", filepath.Base(m), err))
+			}
+		}
 		sc.Emit(events.ArtifactUploaded{Name: label, Path: dst, Size: fi.Size()})
 		totalSize += fi.Size()
 	}
 	return Outputs{"count": len(matches), "size": totalSize}, nil
+}
+
+// mirrorToStore reads a local artifact file back and Puts it into the
+// configured remote store under key "<run-id>/<basename>". Called only
+// when sc.ArtifactStore is non-nil.
+func mirrorToStore(sc *StepContext, path string, size int64) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	key := filepath.Base(path)
+	if sc.RunID != "" {
+		key = sc.RunID + "/" + key
+	}
+	return sc.ArtifactStore.Put(context.Background(), key, f, size, "")
 }
 
 func copyFile(src, dst string) error {
