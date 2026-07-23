@@ -364,9 +364,10 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 	// runOnce wraps a single attempt so the retry loop can call it
 	// without duplicating the timeout / stepCtx plumbing. Returns the
 	// action outputs on success, or (nil, cause, err) on failure — the
-	// caller decides whether to loop or surface a StepFinished.
-	runOnce := func() (actions.Outputs, events.Status, time.Duration, error) {
-		attemptStart := time.Now()
+	// caller decides whether to loop or surface a StepFinished. Per-
+	// attempt duration isn't returned because StepFinished carries the
+	// wall-clock total (see `time.Since(start)` below).
+	runOnce := func() (actions.Outputs, events.Status, error) {
 		stepCtx := ctx
 		var cancel context.CancelFunc
 		if node.Timeout > 0 {
@@ -374,18 +375,17 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 			defer cancel()
 		}
 		outs, err := act.Run(stepCtx, sc)
-		d := time.Since(attemptStart)
 		if err != nil {
 			if stepCtx.Err() == context.DeadlineExceeded {
-				return nil, events.TimedOut, d, err
+				return nil, events.TimedOut, err
 			}
-			return nil, events.Failed, d, err
+			return nil, events.Failed, err
 		}
-		return outs, events.Success, d, nil
+		return outs, events.Success, nil
 	}
 
 	start := time.Now()
-	outs, cause, dur, err := runOnce()
+	outs, cause, err := runOnce()
 
 	// Retry loop. Attempts is 1-indexed against total; attempt==1 was
 	// the initial call above. Only loop while the observed cause is in
@@ -410,7 +410,7 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 				goto finishAttempts
 			case <-time.After(delay):
 			}
-			outs, cause, dur, err = runOnce()
+			outs, cause, err = runOnce()
 			if err == nil {
 				break
 			}
@@ -420,25 +420,23 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 		}
 	}
 finishAttempts:
+	dur := time.Since(start)
 
 	if err != nil {
 		if cause == events.TimedOut {
-			rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.TimedOut, Duration: time.Since(start), Err: err})
+			rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.TimedOut, Duration: dur, Err: err})
 			setStepView(rc, node.ID, expr.StepView{Status: string(events.TimedOut), Outputs: map[string]any{}})
 			return events.TimedOut
 		}
 		if node.ContinueOnError {
-			rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.FailedContinued, Duration: time.Since(start), Err: err})
+			rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.FailedContinued, Duration: dur, Err: err})
 			setStepView(rc, node.ID, expr.StepView{Status: string(events.FailedContinued), Outputs: map[string]any{}})
 			return events.FailedContinued
 		}
-		rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.Failed, Duration: time.Since(start), Err: err})
+		rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.Failed, Duration: dur, Err: err})
 		setStepView(rc, node.ID, expr.StepView{Status: string(events.Failed), Outputs: map[string]any{}})
 		return events.Failed
 	}
-	// Success: dur is the last attempt's duration, but StepFinished
-	// carries the wall-clock total so the report shows the true cost.
-	dur = time.Since(start)
 
 	// Merge in step-declared outputs (http/template outputs mapping). If the
 	// action populated sc.Response (http does), include it in the eval env.
