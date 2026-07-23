@@ -54,17 +54,16 @@ func (r runAction) Run(ctx context.Context, sc *StepContext) (Outputs, error) {
 		sc.Log(events.Info, "warning: inline ${{ ... }} in run: body — prefer env: for safety (spec §7.3)")
 	}
 
-	shell, shellArg := resolveShell(sc.Shell)
-	if shell == "" {
-		return nil, errors.New("run: no shell available on PATH (tried bash, sh)")
-	}
-
 	outputFile, err := os.CreateTemp("", "weftly-output-*.env")
 	if err != nil {
 		return nil, fmt.Errorf("run: create output file: %w", err)
 	}
 	outputPath := outputFile.Name()
 	_ = outputFile.Close()
+	// container mounts a bind file with -v; the mount inside the guest
+	// must be writable by whatever uid the image runs as. 0666 keeps
+	// this simple without needing --userns.
+	_ = os.Chmod(outputPath, 0o666)
 	defer os.Remove(outputPath)
 
 	// Materialize the script body to a temp file rather than passing via -c,
@@ -82,14 +81,26 @@ func (r runAction) Run(ctx context.Context, sc *StepContext) (Outputs, error) {
 	_ = scriptFile.Close()
 	defer os.Remove(scriptPath)
 
-	var cmdArgs []string
-	if shellArg != "" {
-		cmdArgs = append(cmdArgs, shellArg)
+	var cmd *exec.Cmd
+	if sc.Container != "" {
+		cmd, err = buildContainerCmd(ctx, sc, scriptPath, outputPath)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		shell, shellArg := resolveShell(sc.Shell)
+		if shell == "" {
+			return nil, errors.New("run: no shell available on PATH (tried bash, sh)")
+		}
+		var cmdArgs []string
+		if shellArg != "" {
+			cmdArgs = append(cmdArgs, shellArg)
+		}
+		cmdArgs = append(cmdArgs, scriptPath)
+		cmd = exec.CommandContext(ctx, shell, cmdArgs...)
+		cmd.Dir = sc.Workdir
+		cmd.Env = buildEnv(sc, outputPath)
 	}
-	cmdArgs = append(cmdArgs, scriptPath)
-	cmd := exec.CommandContext(ctx, shell, cmdArgs...)
-	cmd.Dir = sc.Workdir
-	cmd.Env = buildEnv(sc, outputPath)
 	setupProcessGroup(cmd)
 	// On context cancel (timeout or user), kill the whole process group,
 	// not just the parent shell. Without this, an orphaned grandchild

@@ -22,6 +22,7 @@ type StepNode struct {
 	ContinueOnError bool
 	Timeout         time.Duration
 	Shell           string
+	Container       string            // opt-in container image for run steps
 	OutputsMap      map[string]string // declared outputs for http/template
 
 	// SkipReason is set by the scheduler when this node is being

@@ -106,6 +106,11 @@ func validateSteps(wf *Workflow) Errors {
 		if s.ActionType == "" {
 			errs = append(errs, Error{Line: line, Path: path, Message: "must declare exactly one action key (" + strings.Join(actionKeys, ", ") + ")"})
 		}
+		// container: is only meaningful when the step body is a shell
+		// script — no other action would know what to do with an image.
+		if s.Container != "" && s.ActionType != "run" {
+			errs = append(errs, Error{Line: line, Path: path + ".container", Message: "container: is only valid on a run step"})
+		}
 	}
 
 	// needs references must exist and must not form a cycle.

@@ -349,6 +349,7 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 		Emit:          rc.Bus.Publish,
 		Expr:          rc.Expr,
 		Shell:         shell,
+		Container:     node.Container,
 		Timeout:       node.Timeout,
 		Strict:        rc.Strict,
 		AutoYes:       rc.AutoYes,
