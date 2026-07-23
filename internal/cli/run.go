@@ -26,6 +26,7 @@ func newRunCmd() *cobra.Command {
 		noColor    bool
 		strict     bool
 		autoYes    bool
+		parallel   int
 	)
 	cmd := &cobra.Command{
 		Use:   "run <workflow.yml>",
@@ -98,11 +99,12 @@ func newRunCmd() *cobra.Command {
 			}
 
 			res, err := engine.Run(context.Background(), wf, engine.Options{
-				Strict:  strict,
-				AutoYes: autoYes,
-				Inputs:  supplied,
-				Vars:    varOverrides,
-				Bus:     bus,
+				Strict:   strict,
+				AutoYes:  autoYes,
+				Parallel: parallel,
+				Inputs:   supplied,
+				Vars:     varOverrides,
+				Bus:      bus,
 			})
 			if err != nil {
 				return err
@@ -124,6 +126,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&noColor, "no-color", false, "plain output")
 	cmd.Flags().BoolVar(&strict, "strict", false, "treat inline expr-in-run as an error")
 	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-answer 'yes' to every prompt(type:confirm) step")
+	cmd.Flags().IntVarP(&parallel, "parallel", "p", 4, "maximum concurrent steps (needs edges are always honored)")
 	return cmd
 }
 

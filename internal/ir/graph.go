@@ -23,6 +23,13 @@ type StepNode struct {
 	Timeout         time.Duration
 	Shell           string
 	OutputsMap      map[string]string // declared outputs for http/template
+
+	// SkipReason is set by the scheduler when this node is being
+	// short-circuited because an upstream fatal failed. The executor
+	// checks this before dispatching, emits StepStarted + StepFinished
+	// with status Skipped, and does not run the action. Empty in the
+	// normal path.
+	SkipReason string
 }
 
 // Graph is the execution plan.

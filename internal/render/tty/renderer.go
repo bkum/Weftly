@@ -19,6 +19,10 @@ type Renderer struct {
 	Color   bool // ANSI escapes enabled
 	Secrets *secrets.Registry
 
+	// active tracks step IDs currently in flight so log lines can be
+	// prefixed with the step name when more than one runs concurrently
+	// (parallel DAG execution). Single-active runs stay uncluttered.
+	active      map[string]bool
 	currentStep string
 	stepStart   time.Time
 	summaries   []string
@@ -26,7 +30,7 @@ type Renderer struct {
 
 // New returns a Renderer bound to w.
 func New(w io.Writer, color bool, sec *secrets.Registry) *Renderer {
-	return &Renderer{Out: w, Color: color, Secrets: sec}
+	return &Renderer{Out: w, Color: color, Secrets: sec, active: map[string]bool{}}
 }
 
 // Handle is the subscriber function passed to events.Bus.Subscribe.
@@ -35,9 +39,7 @@ func (r *Renderer) Handle(e events.Event) {
 	case events.RunStarted:
 		r.printf("%s workflow %s  run %s\n", r.color(">", cyan), ev.Workflow, ev.RunID)
 	case events.StepStarted:
-		if r.currentStep != "" {
-			// no-op; grouped step already announced its start
-		}
+		r.active[ev.StepID] = true
 		r.currentStep = ev.StepID
 		r.stepStart = time.Now()
 		name := ev.Name
@@ -54,12 +56,19 @@ func (r *Renderer) Handle(e events.Event) {
 		if ev.Stream == events.Stderr {
 			prefix = "  " + r.color("!", yellow) + " "
 		}
+		// When multiple steps are in flight (parallel DAG), disambiguate
+		// each log line with the step id — otherwise the output reads
+		// like one stream and users can't tell where a message came from.
+		if len(r.active) > 1 {
+			prefix += r.color("["+ev.StepID+"]", dim) + " "
+		}
 		r.printf("%s%s\n", prefix, line)
 	case events.StepOutput:
 		r.printf("  %s %s=%v\n", r.color("→", dim), ev.Key, ev.Value)
 	case events.StepFinished:
+		delete(r.active, ev.StepID)
 		glyph, col := statusGlyph(ev.Status)
-		msg := fmt.Sprintf("  %s %s in %s", r.color(glyph, col), ev.Status, ev.Duration.Round(time.Millisecond))
+		msg := fmt.Sprintf("  %s %s %s in %s", r.color(glyph, col), ev.StepID, ev.Status, ev.Duration.Round(time.Millisecond))
 		if ev.Err != nil {
 			msg += "  " + r.color(ev.Err.Error(), red)
 		}
