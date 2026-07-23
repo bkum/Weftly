@@ -4,19 +4,78 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
 
-// Load reads and parses a workflow file. It performs YAML unmarshal only; no
-// validation. Callers should follow with Validate.
+// Load reads and parses a workflow file, expanding any `include:` list
+// recursively (cycle-detected, paths resolved relative to the including
+// file). No validation.
 func Load(path string) (*Workflow, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	return loadWithVisited(abs, map[string]bool{})
+}
+
+// loadWithVisited is the recursive helper for include expansion. The
+// visited map is passed by reference (same map across the whole tree)
+// so a cycle like a.yml → b.yml → a.yml is caught even across
+// unrelated branches.
+func loadWithVisited(path string, visited map[string]bool) (*Workflow, error) {
+	if visited[path] {
+		return nil, fmt.Errorf("include: cycle detected at %s", path)
+	}
+	visited[path] = true
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	return Parse(f)
+	wf, err := Parse(f)
+	if err != nil {
+		return nil, err
+	}
+	if len(wf.Include) == 0 {
+		return wf, nil
+	}
+	// Expand each include relative to the including file and prepend
+	// its steps + merge its env + inherit its defaults.shell (only if
+	// the parent didn't set one). Included name/inputs/description are
+	// deliberately dropped — this is a step library, not a workflow.
+	base := filepath.Dir(path)
+	var mergedSteps []Step
+	for _, rel := range wf.Include {
+		incPath := rel
+		if !filepath.IsAbs(incPath) {
+			incPath = filepath.Join(base, rel)
+		}
+		incAbs, err := filepath.Abs(incPath)
+		if err != nil {
+			return nil, fmt.Errorf("include %q: %w", rel, err)
+		}
+		child, err := loadWithVisited(incAbs, visited)
+		if err != nil {
+			return nil, fmt.Errorf("include %q: %w", rel, err)
+		}
+		mergedSteps = append(mergedSteps, child.Steps...)
+		for k, v := range child.Env {
+			if _, exists := wf.Env[k]; !exists {
+				if wf.Env == nil {
+					wf.Env = map[string]string{}
+				}
+				wf.Env[k] = v
+			}
+		}
+		if wf.Defaults.Shell == "" && child.Defaults.Shell != "" {
+			wf.Defaults.Shell = child.Defaults.Shell
+		}
+	}
+	// Included steps come first (a prelude); parent steps run after.
+	wf.Steps = append(mergedSteps, wf.Steps...)
+	return wf, nil
 }
 
 // Parse reads a workflow from r.

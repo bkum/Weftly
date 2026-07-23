@@ -51,6 +51,12 @@ type Workflow struct {
 	Env         map[string]string `yaml:"env"`
 	Defaults    Defaults          `yaml:"defaults"`
 	Steps       []Step            `yaml:"steps"`
+	// Include lists other workflow YAML files (paths relative to the
+	// including file) whose steps + env + defaults.shell get merged
+	// into this workflow at Load time. Cycles are detected. Included
+	// name / inputs / description / requires are ignored — includes are
+	// step libraries, not full workflows.
+	Include []string `yaml:"include"`
 	// Cleanup runs sequentially after the main graph completes,
 	// regardless of the run's outcome. Cleanup steps get success() /
 	// failure() / cancelled() populated from the run's aggregate
