@@ -27,6 +27,7 @@ func newServerCmd() *cobra.Command {
 		s3SecretKey   string
 		s3Plaintext   bool
 		schedulesFile string
+		auditFile     string
 	)
 	cmd := &cobra.Command{
 		Use:   "server",
@@ -61,6 +62,7 @@ func newServerCmd() *cobra.Command {
 				AuthFile:        authFile,
 				S3:              s3,
 				SchedulesFile:   schedulesFile,
+				AuditFile:       auditFile,
 				ShutdownTimeout: 15 * time.Second,
 			})
 			if err != nil {
@@ -84,5 +86,6 @@ func newServerCmd() *cobra.Command {
 	cmd.Flags().StringVar(&s3SecretKey, "s3-secret-key", "", "S3 secret key (or WEFTLY_S3_SECRET_KEY env)")
 	cmd.Flags().BoolVar(&s3Plaintext, "s3-plaintext", false, "talk http to the S3 endpoint (dev-only, e.g. local MinIO)")
 	cmd.Flags().StringVar(&schedulesFile, "schedules", "", "path to schedules.yaml (enables cron-driven runs); reload with SIGHUP or POST /reload")
+	cmd.Flags().StringVar(&auditFile, "audit-file", "", "append-only JSON-lines audit log of mutating requests; empty = in-memory only, exposed at GET /audit (admin)")
 	return cmd
 }

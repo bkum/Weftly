@@ -48,6 +48,12 @@ type Config struct {
 	// the server launches a scheduler goroutine that dispatches workflows
 	// on their cron cadence (spec §17). Empty disables scheduling.
 	SchedulesFile string
+	// AuditFile is the append-only JSON-lines log of mutating requests
+	// (POST /runs, DELETE /runs/{id}, POST /schedules/*/trigger,
+	// POST /reload). Empty disables the on-disk log; the in-memory
+	// tail exposed at GET /audit still populates during the process
+	// lifetime.
+	AuditFile string
 	// MaxBodyBytes caps request bodies to prevent trivial DoS.
 	// Default 1 MiB when zero.
 	MaxBodyBytes int64
@@ -68,6 +74,7 @@ type Server struct {
 	auth  Authenticator
 	store artifacts.Store      // nil unless Config.S3 is set
 	sched *scheduler.Scheduler // nil unless Config.SchedulesFile is set
+	audit *AuditLog            // in-memory tail always available; on-disk log if AuditFile is set
 }
 
 // New builds a Server. It loads the catalogue eagerly so mis-configuration
@@ -109,6 +116,10 @@ func New(cfg Config) (*Server, error) {
 		cfg.Logger.Info("server: S3 artifact store enabled",
 			"endpoint", cfg.S3.Endpoint, "bucket", cfg.S3.Bucket, "prefix", cfg.S3.KeyPrefix)
 	}
+	audit, err := NewAuditLog(cfg.AuditFile, cfg.Logger)
+	if err != nil {
+		return nil, err
+	}
 	s := &Server{
 		cfg:   cfg,
 		log:   cfg.Logger,
@@ -116,6 +127,7 @@ func New(cfg Config) (*Server, error) {
 		runs:  newRunManager(cfg.RunsDir, cfg.Logger, store),
 		auth:  auth,
 		store: store,
+		audit: audit,
 	}
 	if cfg.SchedulesFile != "" {
 		if err := s.initScheduler(); err != nil {
@@ -192,15 +204,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /workflows", s.handleListWorkflows)
 	mux.HandleFunc("GET /workflows/{id}", s.handleGetWorkflow)
 	mux.HandleFunc("GET /runs", s.handleListRuns)
-	mux.HandleFunc("POST /runs", s.handleCreateRun)
+	mux.HandleFunc("POST /runs", s.auditMiddleware(s.handleCreateRun, extractCreateRunAudit))
 	mux.HandleFunc("GET /runs/{id}", s.handleGetRun)
-	mux.HandleFunc("DELETE /runs/{id}", s.handleCancelRun)
+	mux.HandleFunc("DELETE /runs/{id}", s.auditMiddleware(s.handleCancelRun, nil))
 	mux.HandleFunc("GET /runs/{id}/events", s.handleRunEvents)
 	mux.HandleFunc("GET /runs/{id}/artifacts/{name}", s.handleArtifact)
-	mux.HandleFunc("POST /reload", s.handleReload)
+	mux.HandleFunc("POST /reload", s.auditMiddleware(s.handleReload, nil))
 	mux.HandleFunc("GET /schedules", s.handleListSchedules)
 	mux.HandleFunc("GET /schedules/{id}", s.handleGetSchedule)
-	mux.HandleFunc("POST /schedules/{id}/trigger", s.handleTriggerSchedule)
+	mux.HandleFunc("POST /schedules/{id}/trigger", s.auditMiddleware(s.handleTriggerSchedule, extractTriggerAudit))
+	mux.HandleFunc("GET /audit", s.handleAudit)
 	// UI (unauthenticated shell; the SPA does authenticated API calls)
 	ui := uiHandler()
 	mux.Handle("GET /", ui)
@@ -266,6 +279,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		if err := s.srv.Shutdown(shutCtx); err != nil {
 			return fmt.Errorf("shutdown: %w", err)
 		}
+		_ = s.audit.Close()
 		return nil
 	case err := <-errCh:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
