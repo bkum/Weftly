@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bkum/weftly/internal/events"
+	"github.com/bkum/weftly/internal/state"
 	"github.com/bkum/weftly/internal/workspace"
 )
 
@@ -91,6 +92,27 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Location", "/runs/"+rec.ID)
 	writeJSON(w, http.StatusAccepted, createRunResp{RunID: rec.ID})
+}
+
+// handleListRuns returns a summary of every run persisted under
+// <RunsDir>/runs/. Optional ?workflow=<id> filter. Sorted newest first
+// by the state layer.
+func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
+	all, err := state.LoadRunsDir(filepath.Join(s.cfg.RunsDir, "runs"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if wf := r.URL.Query().Get("workflow"); wf != "" {
+		filtered := all[:0]
+		for _, r := range all {
+			if r.Workflow == wf {
+				filtered = append(filtered, r)
+			}
+		}
+		all = filtered
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": all})
 }
 
 func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
