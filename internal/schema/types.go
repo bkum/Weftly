@@ -69,7 +69,7 @@ type Workflow struct {
 }
 
 // The set of action keys recognised on a step. Exactly one must be present.
-var actionKeys = []string{"run", "http", "template", "prompt", "assert", "summary", "upload"}
+var actionKeys = []string{"run", "http", "template", "prompt", "assert", "summary", "upload", "wait", "parse", "notify"}
 
 // Retry declares an automatic-retry policy for a step. Attempts is the
 // total number of tries (including the first), so `attempts: 3` means
