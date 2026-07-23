@@ -12,7 +12,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bkum/weftly/internal/actions"
@@ -29,11 +31,14 @@ import (
 
 // Options bundles run-time knobs.
 type Options struct {
-	BaseDir string // parent of runs/ (default ./.weftly)
-	Strict  bool   // pass through to actions
-	Inputs  map[string]any
-	Vars    map[string]string // --var overrides of workflow env
-	Bus     *events.Bus
+	BaseDir  string // parent of runs/ (default ./.weftly)
+	Strict   bool   // pass through to actions
+	AutoYes  bool   // --yes: prompt(type:confirm) auto-answers true
+	Parallel int    // max concurrent steps; default 4
+	Resume   string // resume this run-id (or state.json path); empty starts a new run
+	Inputs   map[string]any
+	Vars     map[string]string // --var overrides of workflow env
+	Bus      *events.Bus
 }
 
 // Result summarises a completed run.
@@ -63,8 +68,31 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 	}
 	bus := opts.Bus
 
-	runID := newRunID()
-	ws, err := workspace.New(opts.BaseDir, runID)
+	// Resume: reload prior run state, reuse its workspace + run-id.
+	var (
+		runID       string
+		resumeCache map[string]*state.StepState
+	)
+	baseDir := opts.BaseDir
+	if baseDir == "" {
+		baseDir = "./.weftly"
+	}
+	if opts.Resume != "" {
+		prior, _, err := state.Load(filepath.Join(baseDir, "runs"), opts.Resume)
+		if err != nil {
+			return Result{}, err
+		}
+		runID = prior.RunID
+		resumeCache = map[string]*state.StepState{}
+		for id, s := range prior.Steps {
+			if s.Status == events.Success {
+				resumeCache[id] = s
+			}
+		}
+	} else {
+		runID = newRunID()
+	}
+	ws, err := workspace.New(baseDir, runID)
 	if err != nil {
 		return Result{}, fmt.Errorf("workspace: %w", err)
 	}
@@ -83,6 +111,12 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 
 	// State + report writers subscribe to the same bus every renderer sees.
 	sw := state.New(ws.Root, sec)
+	if opts.Resume != "" {
+		prior, _, _ := state.Load(filepath.Join(baseDir, "runs"), opts.Resume)
+		if prior != nil {
+			sw.Adopt(prior)
+		}
+	}
 	rep := report.New(sec)
 	bus.Subscribe(sw.Handle)
 	bus.Subscribe(rep.Handle)
@@ -105,33 +139,39 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 
 	graph := compile.Compile(wf)
 	ev := expr.New()
+	// stepViews is read by runStep to build the expr env; writes are
+	// serialised by stepMu so parallel steps don't race.
 	stepViews := map[string]expr.StepView{}
+	var stepMu sync.Mutex
 
 	bus.Publish(events.RunStarted{Workflow: wf.Name, RunID: runID, Workspace: ws.StepsDir})
 	runStart := time.Now()
-	overallStatus := events.Success
 
 	defaultShell := wf.Defaults.Shell
-
-	for _, node := range graph.Order {
-		status := runStep(ctx, node, runCtx{
-			Workflow:     wf,
-			Inputs:       inputs,
-			Secrets:      sec,
-			Env:          baseEnv,
-			Steps:        stepViews,
-			Workspace:    ws,
-			Bus:          bus,
-			Expr:         ev,
-			DefaultShell: defaultShell,
-			Strict:       opts.Strict,
-			RunID:        runID,
-		})
-		if status == events.Failed || status == events.TimedOut {
-			overallStatus = events.Failed
-			break
-		}
+	parallel := opts.Parallel
+	if parallel < 1 {
+		parallel = 4
 	}
+
+	rc := runCtx{
+		Workflow:     wf,
+		Inputs:       inputs,
+		Secrets:      sec,
+		Env:          baseEnv,
+		Steps:        stepViews,
+		StepMu:       &stepMu,
+		ResumeCache:  resumeCache,
+		Workspace:    ws,
+		Bus:          bus,
+		Expr:         ev,
+		DefaultShell: defaultShell,
+		Strict:       opts.Strict,
+		AutoYes:      opts.AutoYes,
+		RunID:        runID,
+	}
+	overallStatus := schedule(ctx, graph, parallel, func(ctx context.Context, node *ir.StepNode) events.Status {
+		return runStep(ctx, node, rc)
+	})
 
 	dur := time.Since(runStart)
 	bus.Publish(events.RunFinished{Status: overallStatus, Duration: dur})
@@ -157,20 +197,63 @@ type runCtx struct {
 	Secrets      *secrets.Registry
 	Env          map[string]string
 	Steps        map[string]expr.StepView
+	StepMu       *sync.Mutex // serialises reads/writes to Steps under parallel execution
+	ResumeCache  map[string]*state.StepState
 	Workspace    *workspace.Workspace
 	Bus          *events.Bus
 	Expr         *expr.Evaluator
 	DefaultShell string
 	Strict       bool
+	AutoYes      bool
 	RunID        string
 }
 
 // runStep resolves per-step context, dispatches to the action, and updates
-// the shared step view. Returns the terminal status.
+// the shared step view. Returns the terminal status. Safe under parallel
+// invocation as long as rc.StepMu guards reads/writes of rc.Steps.
 func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
+	// Scheduler-injected cascade skip: emit Started + Finished{Skipped}
+	// and don't execute the action.
+	if node.SkipReason != "" {
+		rc.Bus.Publish(events.StepStarted{StepID: node.ID, Name: node.Name, Action: node.Action})
+		rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.Skipped, Err: fmt.Errorf("%s", node.SkipReason)})
+		setStepView(rc, node.ID, expr.StepView{Status: string(events.Skipped), Outputs: map[string]any{}})
+		return events.Skipped
+	}
+
+	// Resume replay: if this step's success is on disk from a prior run,
+	// re-emit its outputs synthetically and mark the finish as Resumed=true
+	// so renderers/reports read the same as a fresh success.
+	if rc.ResumeCache != nil {
+		if prior, ok := rc.ResumeCache[node.ID]; ok && prior.Status == events.Success {
+			rc.Bus.Publish(events.StepStarted{StepID: node.ID, Name: node.Name, Action: node.Action})
+			for k, v := range prior.Outputs {
+				rc.Bus.Publish(events.StepOutput{StepID: node.ID, Key: k, Value: v})
+			}
+			rc.Bus.Publish(events.StepFinished{
+				StepID: node.ID, Status: events.Success, Duration: prior.Duration, Resumed: true,
+			})
+			outs := map[string]any{}
+			for k, v := range prior.Outputs {
+				outs[k] = v
+			}
+			setStepView(rc, node.ID, expr.StepView{Status: string(events.Success), Outputs: outs})
+			return events.Success
+		}
+	}
+
+	// Snapshot the step map under lock so parallel reads see a consistent
+	// view even while other steps are writing.
+	rc.StepMu.Lock()
+	stepsSnap := make(map[string]expr.StepView, len(rc.Steps))
+	for k, v := range rc.Steps {
+		stepsSnap[k] = v
+	}
+	rc.StepMu.Unlock()
+
 	envForExpr := expr.Env{
 		Inputs:  rc.Inputs,
-		Steps:   rc.Steps,
+		Steps:   stepsSnap,
 		Env:     rc.Env,
 		Secrets: map[string]string{}, // secrets exposed as-is to expressions; renderer masks output
 		Run:     expr.RunMeta{ID: rc.RunID, Workspace: rc.Workspace.StepsDir},
@@ -191,13 +274,13 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 		if err != nil {
 			rc.Bus.Publish(events.StepStarted{StepID: node.ID, Name: node.Name, Action: node.Action})
 			rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.Failed, Err: fmt.Errorf("if: %w", err)})
-			rc.Steps[node.ID] = expr.StepView{Status: string(events.Failed), Outputs: map[string]any{}}
+			setStepView(rc, node.ID, expr.StepView{Status: string(events.Failed), Outputs: map[string]any{}})
 			return events.Failed
 		}
 		if !ok {
 			rc.Bus.Publish(events.StepStarted{StepID: node.ID, Name: node.Name, Action: node.Action})
 			rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.Skipped})
-			rc.Steps[node.ID] = expr.StepView{Status: string(events.Skipped), Outputs: map[string]any{}}
+			setStepView(rc, node.ID, expr.StepView{Status: string(events.Skipped), Outputs: map[string]any{}})
 			return events.Skipped
 		}
 	}
@@ -246,6 +329,7 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 		Shell:        shell,
 		Timeout:      node.Timeout,
 		Strict:       rc.Strict,
+		AutoYes:      rc.AutoYes,
 		HTTPTimeout:  rc.Workflow.Defaults.HTTP.Timeout,
 		HTTPHeaders:  rc.Workflow.Defaults.HTTP.Headers,
 	}
@@ -266,16 +350,16 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 	if err != nil {
 		if stepCtx.Err() == context.DeadlineExceeded {
 			rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.TimedOut, Duration: dur, Err: err})
-			rc.Steps[node.ID] = expr.StepView{Status: string(events.TimedOut), Outputs: map[string]any{}}
+			setStepView(rc, node.ID, expr.StepView{Status: string(events.TimedOut), Outputs: map[string]any{}})
 			return events.TimedOut
 		}
 		if node.ContinueOnError {
 			rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.FailedContinued, Duration: dur, Err: err})
-			rc.Steps[node.ID] = expr.StepView{Status: string(events.FailedContinued), Outputs: map[string]any{}}
+			setStepView(rc, node.ID, expr.StepView{Status: string(events.FailedContinued), Outputs: map[string]any{}})
 			return events.FailedContinued
 		}
 		rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.Failed, Duration: dur, Err: err})
-		rc.Steps[node.ID] = expr.StepView{Status: string(events.Failed), Outputs: map[string]any{}}
+		setStepView(rc, node.ID, expr.StepView{Status: string(events.Failed), Outputs: map[string]any{}})
 		return events.Failed
 	}
 
@@ -293,7 +377,7 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 			v, err := rc.Expr.Interpolate(expression, outEnv)
 			if err != nil {
 				rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.Failed, Duration: dur, Err: fmt.Errorf("outputs.%s: %w", k, err)})
-				rc.Steps[node.ID] = expr.StepView{Status: string(events.Failed), Outputs: map[string]any{}}
+				setStepView(rc, node.ID, expr.StepView{Status: string(events.Failed), Outputs: map[string]any{}})
 				return events.Failed
 			}
 			outs[k] = v
@@ -301,14 +385,27 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 		}
 	}
 	rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.Success, Duration: dur})
-	rc.Steps[node.ID] = expr.StepView{Status: string(events.Success), Outputs: outs}
+	setStepView(rc, node.ID, expr.StepView{Status: string(events.Success), Outputs: outs})
 	return events.Success
+}
+
+// setStepView updates rc.Steps under the shared mutex so parallel step
+// execution doesn't race on the map. Anonymous steps (empty id) are
+// tracked in the map under a synthetic key so the scheduler's completion
+// tally is correct, but nobody references them via expressions.
+func setStepView(rc runCtx, id string, sv expr.StepView) {
+	if id == "" {
+		return
+	}
+	rc.StepMu.Lock()
+	rc.Steps[id] = sv
+	rc.StepMu.Unlock()
 }
 
 func abortStep(rc runCtx, node *ir.StepNode, err error) events.Status {
 	rc.Bus.Publish(events.StepStarted{StepID: node.ID, Name: node.Name, Action: node.Action})
 	rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.Failed, Err: err})
-	rc.Steps[node.ID] = expr.StepView{Status: string(events.Failed), Outputs: map[string]any{}}
+	setStepView(rc, node.ID, expr.StepView{Status: string(events.Failed), Outputs: map[string]any{}})
 	return events.Failed
 }
 

@@ -25,6 +25,9 @@ func newRunCmd() *cobra.Command {
 		jsonOutput bool
 		noColor    bool
 		strict     bool
+		autoYes    bool
+		parallel   int
+		resume     string
 	)
 	cmd := &cobra.Command{
 		Use:   "run <workflow.yml>",
@@ -97,10 +100,13 @@ func newRunCmd() *cobra.Command {
 			}
 
 			res, err := engine.Run(context.Background(), wf, engine.Options{
-				Strict: strict,
-				Inputs: supplied,
-				Vars:   varOverrides,
-				Bus:    bus,
+				Strict:   strict,
+				AutoYes:  autoYes,
+				Parallel: parallel,
+				Resume:   resume,
+				Inputs:   supplied,
+				Vars:     varOverrides,
+				Bus:      bus,
 			})
 			if err != nil {
 				return err
@@ -121,6 +127,9 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit the event stream as JSON")
 	cmd.Flags().BoolVar(&noColor, "no-color", false, "plain output")
 	cmd.Flags().BoolVar(&strict, "strict", false, "treat inline expr-in-run as an error")
+	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-answer 'yes' to every prompt(type:confirm) step")
+	cmd.Flags().IntVarP(&parallel, "parallel", "p", 4, "maximum concurrent steps (needs edges are always honored)")
+	cmd.Flags().StringVar(&resume, "resume", "", "resume a prior run by id (or state.json path); skips successful steps")
 	return cmd
 }
 

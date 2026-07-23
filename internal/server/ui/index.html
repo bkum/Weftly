@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Weftly</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div id="app" data-view="loading"></div>
+
+  <!-- Shared shell (sidebar + main) rendered by JS into #app. Templates
+       below define the per-view content. -->
+
+  <template id="tmpl-shell">
+    <div class="wf-shell">
+      <aside class="wf-sidebar" data-expanded="true">
+        <div class="wf-brand">
+          <div class="wf-logo"></div>
+          <div class="wf-brand-text">
+            <div class="wf-brand-name">Weftly</div>
+            <div class="wf-brand-meta">self-hosted</div>
+          </div>
+        </div>
+        <nav class="wf-nav">
+          <a data-nav="catalogue" href="#/"><span class="wf-dot filled"></span>Catalogue</a>
+          <a data-nav="history"   href="#/history"><span class="wf-dot outline"></span>Run History</a>
+        </nav>
+        <div class="wf-sidebar-footer">
+          <div class="wf-user-name">weftly</div>
+          <div class="wf-user-team">v0.2</div>
+        </div>
+      </aside>
+      <main class="wf-main"></main>
+    </div>
+  </template>
+
+  <template id="tmpl-catalogue">
+    <section class="wf-page wf-catalogue">
+      <header class="wf-page-header">
+        <div>
+          <h1>Runbooks</h1>
+          <p class="wf-sub">Curated operational workflows, version-controlled and ready to run.</p>
+        </div>
+      </header>
+      <div class="wf-toolbar">
+        <input class="wf-search" placeholder="Search runbooks…" data-role="search">
+      </div>
+      <div class="wf-grid" data-role="grid"></div>
+    </section>
+  </template>
+
+  <template id="tmpl-workflow-card">
+    <a class="wf-card" data-role="card">
+      <div class="wf-card-title" data-role="title"></div>
+      <div class="wf-card-desc" data-role="desc"></div>
+      <div class="wf-card-footer">
+        <span class="wf-tag" data-role="steps"></span>
+      </div>
+    </a>
+  </template>
+
+  <template id="tmpl-form">
+    <section class="wf-page wf-form">
+      <header class="wf-page-header">
+        <a class="wf-back" href="#/">← Runbooks</a>
+        <div>
+          <h1 data-role="title"></h1>
+          <p class="wf-sub" data-role="desc"></p>
+        </div>
+      </header>
+      <form class="wf-form-body" data-role="form" onsubmit="return false;">
+        <div class="wf-fields" data-role="fields"></div>
+        <div class="wf-form-actions">
+          <button class="wf-btn wf-btn-primary" data-role="submit">Run</button>
+          <span class="wf-status" data-role="status"></span>
+        </div>
+      </form>
+    </section>
+  </template>
+
+  <template id="tmpl-live">
+    <section class="wf-page wf-live">
+      <header class="wf-page-header">
+        <a class="wf-back" href="#/history">← Runs</a>
+        <div>
+          <h1 data-role="title"></h1>
+          <p class="wf-sub"><span data-role="runid" class="wf-mono"></span> <span data-role="badge" class="wf-badge"></span></p>
+        </div>
+      </header>
+      <div class="wf-conn" data-role="conn" hidden>Reconnecting…</div>
+      <ol class="wf-steps" data-role="steps"></ol>
+      <section class="wf-summary" data-role="summary" hidden>
+        <h2>Summary</h2>
+        <div data-role="summary-body"></div>
+      </section>
+      <section class="wf-artifacts" data-role="artifacts" hidden>
+        <h2>Artifacts</h2>
+        <ul data-role="artifact-list"></ul>
+      </section>
+    </section>
+  </template>
+
+  <template id="tmpl-history">
+    <section class="wf-page wf-history">
+      <header class="wf-page-header">
+        <div>
+          <h1>Run History</h1>
+          <p class="wf-sub">Recent runs on this server.</p>
+        </div>
+      </header>
+      <div class="wf-history-list" data-role="list"></div>
+    </section>
+  </template>
+
+  <script src="./app.js" type="module"></script>
+</body>
+</html>

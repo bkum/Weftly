@@ -25,6 +25,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(newRunCmd())
 	root.AddCommand(newValidateCmd())
 	root.AddCommand(newListCmd())
+	root.AddCommand(newServerCmd())
 	root.AddCommand(newVersionCmd())
 	return root
 }
