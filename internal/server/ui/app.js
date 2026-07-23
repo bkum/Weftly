@@ -46,7 +46,12 @@ function renderShell() {
   const shell = el("tmpl-shell");
   app.appendChild(shell);
   // highlight nav
-  const nav = (window.location.hash || "#/").startsWith("#/history") ? "history" : "catalogue";
+  const hash = window.location.hash || "#/";
+  const nav = hash.startsWith("#/history")
+    ? "history"
+    : hash.startsWith("#/schedules")
+      ? "schedules"
+      : "catalogue";
   shell.querySelectorAll(".wf-nav a").forEach((a) => {
     if (a.dataset.nav === nav) a.setAttribute("aria-current", "page");
   });
@@ -59,6 +64,7 @@ function route() {
   if (hash.startsWith("#/workflow/")) return renderForm(hash.slice("#/workflow/".length));
   if (hash.startsWith("#/runs/")) return renderRun(hash.slice("#/runs/".length));
   if (hash === "#/history") return renderHistory();
+  if (hash === "#/schedules") return renderSchedules();
   renderCatalogue();
 }
 window.addEventListener("hashchange", route);
@@ -254,9 +260,24 @@ async function renderRun(runID) {
   const artifactsEl = page.querySelector('[data-role="artifacts"]');
   const artifactList = page.querySelector('[data-role="artifact-list"]');
   const conn = page.querySelector('[data-role="conn"]');
+  const cancelBtn = page.querySelector('[data-role="cancel"]');
 
   badge.textContent = "running";
   badge.className = "wf-badge running";
+  cancelBtn.hidden = false;
+  cancelBtn.addEventListener("click", async () => {
+    if (!confirm("Cancel this run? Any in-flight step will be killed.")) return;
+    cancelBtn.disabled = true;
+    cancelBtn.textContent = "Cancelling…";
+    try {
+      const r = await api("/runs/" + encodeURIComponent(runID), { method: "DELETE" });
+      if (!r.ok) throw new Error(await r.text());
+    } catch (e) {
+      cancelBtn.disabled = false;
+      cancelBtn.textContent = "Cancel run";
+      alert("Cancel failed: " + e.message);
+    }
+  });
 
   const stepMap = new Map();
   const ensureStep = (id, name, action) => {
@@ -351,6 +372,7 @@ async function renderRun(runID) {
       case "RunFinished":
         badge.textContent = ev.Status;
         badge.className = "wf-badge " + ev.Status;
+        cancelBtn.hidden = true;
         break;
     }
   };
@@ -414,6 +436,82 @@ async function renderHistory() {
     }
   } catch (e) {
     list.textContent = "Error loading history: " + e.message;
+  }
+}
+
+// --------------- schedules view ------------------------
+
+async function renderSchedules() {
+  const main = renderShell();
+  const page = el("tmpl-schedules");
+  main.appendChild(page);
+  const list = page.querySelector('[data-role="list"]');
+  try {
+    const r = await api("/schedules");
+    if (!r.ok) throw new Error(await r.text());
+    const { schedules } = await r.json();
+    if (!schedules || !schedules.length) {
+      const empty = document.createElement("div");
+      empty.className = "wf-sub";
+      empty.textContent =
+        "No schedules configured. Point `weftly server --schedules schedules.yaml` at a file to enable cron-driven runs.";
+      list.appendChild(empty);
+      return;
+    }
+    for (const s of schedules) {
+      const row = document.createElement("div");
+      row.className = "wf-history-item wf-schedule-row";
+      const id = document.createElement("span");
+      id.style.fontWeight = "500";
+      id.textContent = s.id;
+      const wf = document.createElement("span");
+      wf.className = "id";
+      wf.textContent = s.workflow;
+      const cron = document.createElement("span");
+      cron.className = "cron";
+      cron.textContent = s.cron;
+      const next = document.createElement("span");
+      next.className = "id";
+      next.style.marginLeft = "12px";
+      next.textContent = s.next_fire
+        ? "next: " + new Date(s.next_fire).toLocaleString()
+        : s.parse_error
+          ? "parse error"
+          : "";
+      const trigger = document.createElement("button");
+      trigger.className = "wf-btn wf-btn-primary trigger";
+      trigger.textContent = "Trigger now";
+      trigger.addEventListener("click", async () => {
+        trigger.disabled = true;
+        trigger.textContent = "Starting…";
+        try {
+          const rr = await api("/schedules/" + encodeURIComponent(s.id) + "/trigger", { method: "POST" });
+          if (!rr.ok) throw new Error(await rr.text());
+          const { run_id } = await rr.json();
+          window.location.hash = "#/runs/" + encodeURIComponent(run_id);
+        } catch (e) {
+          trigger.disabled = false;
+          trigger.textContent = "Trigger now";
+          alert("Trigger failed: " + e.message);
+        }
+      });
+      row.appendChild(id);
+      row.appendChild(wf);
+      row.appendChild(cron);
+      row.appendChild(next);
+      row.appendChild(trigger);
+      list.appendChild(row);
+      if (s.last_result && s.last_result.error) {
+        const err = document.createElement("div");
+        err.className = "wf-sub";
+        err.style.color = "var(--err)";
+        err.style.paddingLeft = "12px";
+        err.textContent = "last fire: " + s.last_result.error;
+        list.appendChild(err);
+      }
+    }
+  } catch (e) {
+    list.textContent = "Error loading schedules: " + e.message;
   }
 }
 

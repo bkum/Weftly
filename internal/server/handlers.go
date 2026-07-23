@@ -169,6 +169,36 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"runs": visible})
 }
 
+// handleCancelRun cancels an in-flight run by invoking its context
+// cancel func — that unblocks each step's exec.CommandContext / http
+// request as it runs, and the engine emits StepFinished(status=failed)
+// + RunFinished(status=failed) on the normal path. Returns 404 if the
+// run isn't tracked in memory (already completed; nothing to cancel).
+func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	rec := s.runs.get(id)
+	if rec == nil {
+		writeError(w, http.StatusNotFound, "unknown run (already finished or purged)")
+		return
+	}
+	if !s.runVisibleTo(id, PrincipalFromContext(r.Context())) {
+		writeError(w, http.StatusForbidden, "run not accessible to this principal")
+		return
+	}
+	rec.mu.RLock()
+	closed := rec.closed
+	cancel := rec.cancel
+	rec.mu.RUnlock()
+	if closed || cancel == nil {
+		// Race with completion — the run already reached RunFinished.
+		// Report success rather than 409 to keep the button idempotent.
+		writeJSON(w, http.StatusOK, map[string]any{"run_id": id, "already_finished": true})
+		return
+	}
+	cancel()
+	writeJSON(w, http.StatusAccepted, map[string]any{"run_id": id, "cancelling": true})
+}
+
 func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	rec := s.runs.get(id)

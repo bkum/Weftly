@@ -25,6 +25,7 @@
         <nav class="wf-nav">
           <a data-nav="catalogue" href="#/"><span class="wf-dot filled"></span>Catalogue</a>
           <a data-nav="history"   href="#/history"><span class="wf-dot outline"></span>Run History</a>
+          <a data-nav="schedules" href="#/schedules"><span class="wf-dot outline"></span>Schedules</a>
         </nav>
         <div class="wf-sidebar-footer">
           <div class="wf-user-name">weftly</div>
@@ -87,6 +88,9 @@
           <h1 data-role="title"></h1>
           <p class="wf-sub"><span data-role="runid" class="wf-mono"></span> <span data-role="badge" class="wf-badge"></span></p>
         </div>
+        <div class="wf-page-actions">
+          <button class="wf-btn wf-btn-danger" data-role="cancel" hidden>Cancel run</button>
+        </div>
       </header>
       <div class="wf-conn" data-role="conn" hidden>Reconnecting…</div>
       <ol class="wf-steps" data-role="steps"></ol>
@@ -98,6 +102,18 @@
         <h2>Artifacts</h2>
         <ul data-role="artifact-list"></ul>
       </section>
+    </section>
+  </template>
+
+  <template id="tmpl-schedules">
+    <section class="wf-page wf-schedules">
+      <header class="wf-page-header">
+        <div>
+          <h1>Schedules</h1>
+          <p class="wf-sub">Cron-driven workflow dispatch. Trigger any schedule ahead of its cadence.</p>
+        </div>
+      </header>
+      <div class="wf-history-list" data-role="list"></div>
     </section>
   </template>
 

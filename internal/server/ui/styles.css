@@ -141,6 +141,13 @@ a:hover { text-decoration: underline; }
 .wf-btn:hover { background: var(--bg-hover); }
 .wf-btn-primary { background: var(--accent); color: oklch(0.10 0.02 255); border-color: transparent; font-weight: 600; }
 .wf-btn-primary:hover { background: var(--accent-2); }
+.wf-btn-danger { background: transparent; color: var(--err); border-color: var(--err); }
+.wf-btn-danger:hover { background: oklch(0.30 0.10 25 / 0.4); }
+.wf-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.wf-page-actions { display: flex; align-items: center; gap: 12px; margin-left: auto; }
+.wf-page-header { display: flex; align-items: flex-start; gap: 12px; }
+.wf-schedule-row .cron { font-family: var(--font-mono); color: var(--fg-muted); font-size: 12.5px; }
+.wf-schedule-row .trigger { margin-left: auto; }
 .wf-form-actions { display: flex; align-items: center; gap: 12px; }
 .wf-status { color: var(--fg-muted); font-size: 12.5px; }
 

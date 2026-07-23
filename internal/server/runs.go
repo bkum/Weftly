@@ -28,6 +28,11 @@ type runRecord struct {
 	closed   bool           // set once engine.Run has fully returned
 	waiters  []chan events.Event
 	finished chan struct{}
+	// cancel is the CancelFunc for the engine's run context. Invoking
+	// it kills the in-flight run — the step's cmd.Cancel wired via
+	// exec.CommandContext propagates SIGKILL to the process group.
+	// Set once by runManager.start and never nil for an active run.
+	cancel context.CancelFunc
 }
 
 func newRunRecord(id, workflow string, inputs map[string]any) *runRecord {
@@ -136,6 +141,12 @@ func (m *runManager) start(_ context.Context, wfID string, wf *schema.Workflow, 
 		}
 	})
 
+	// Detached context — the HTTP request may finish before the run
+	// does. Cancelling `runCtx` from handleCancelRun is how the DELETE
+	// endpoint terminates a live run.
+	runCtx, cancel := context.WithCancel(context.Background())
+	rec.cancel = cancel
+
 	errCh := make(chan error, 1)
 	go func() {
 		// rec.handle is passed as PostSubscribers so it fires AFTER
@@ -143,7 +154,7 @@ func (m *runManager) start(_ context.Context, wfID string, wf *schema.Workflow, 
 		// guarantees a client receiving RunFinished from the SSE
 		// stream sees state.json/report.html already flushed to disk
 		// when it pivots to GET /runs/:id.
-		_, err := engine.Run(context.Background(), wf, engine.Options{
+		_, err := engine.Run(runCtx, wf, engine.Options{
 			BaseDir:         m.baseDir,
 			Inputs:          inputs,
 			Bus:             bus,
