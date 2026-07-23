@@ -50,10 +50,11 @@ type StepContext struct {
 	Emit func(events.Event)
 	Expr *expr.Evaluator
 
-	Shell   string        // default shell (overridden per-step if set)
-	Timeout time.Duration // per-step timeout; 0 = none
-	Strict  bool          // --strict: inline ${{ }} in run: bodies is an error
-	AutoYes bool          // --yes: prompt(type:confirm) auto-answers true
+	Shell     string        // default shell (overridden per-step if set)
+	Container string        // opt-in container image for run steps (podman/docker)
+	Timeout   time.Duration // per-step timeout; 0 = none
+	Strict    bool          // --strict: inline ${{ }} in run: bodies is an error
+	AutoYes   bool          // --yes: prompt(type:confirm) auto-answers true
 
 	// HTTPDefaults are workflow-level http defaults merged into every http
 	// action call. Populated by the engine from schema.Defaults.HTTP.

@@ -71,7 +71,8 @@ type Step struct {
 	Env             map[string]string `yaml:"env"`
 	ContinueOnError bool              `yaml:"continue-on-error"`
 	Timeout         time.Duration     `yaml:"timeout"`
-	Shell           string            `yaml:"shell"` // per-step override for run action
+	Shell           string            `yaml:"shell"`     // per-step override for run action
+	Container       string            `yaml:"container"` // image ref; only valid with run action
 	Outputs         map[string]string `yaml:"outputs"`
 
 	// Populated by custom unmarshal. ActionType is one of actionKeys.

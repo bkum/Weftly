@@ -117,6 +117,28 @@ steps:
   - summary: hello
 `,
 		},
+		{
+			name: "container on run is valid",
+			src: `
+name: t
+steps:
+  - id: c
+    container: alpine:3.19
+    run: echo hi
+`,
+		},
+		{
+			name: "container on http is rejected",
+			src: `
+name: t
+steps:
+  - id: c
+    container: alpine:3.19
+    http:
+      GET: http://example.com
+`,
+			wantErr: "container: is only valid on a run step",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

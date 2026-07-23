@@ -43,6 +43,7 @@ func Compile(wf *schema.Workflow) *ir.Graph {
 			ContinueOnError: s.ContinueOnError,
 			Timeout:         s.Timeout,
 			Shell:           s.Shell,
+			Container:       s.Container,
 			OutputsMap:      s.Outputs,
 		})
 		if s.ID != "" {
