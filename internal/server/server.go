@@ -194,6 +194,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /runs", s.handleListRuns)
 	mux.HandleFunc("POST /runs", s.handleCreateRun)
 	mux.HandleFunc("GET /runs/{id}", s.handleGetRun)
+	mux.HandleFunc("DELETE /runs/{id}", s.handleCancelRun)
 	mux.HandleFunc("GET /runs/{id}/events", s.handleRunEvents)
 	mux.HandleFunc("GET /runs/{id}/artifacts/{name}", s.handleArtifact)
 	mux.HandleFunc("POST /reload", s.handleReload)
