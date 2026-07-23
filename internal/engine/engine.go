@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +35,7 @@ type Options struct {
 	Strict   bool   // pass through to actions
 	AutoYes  bool   // --yes: prompt(type:confirm) auto-answers true
 	Parallel int    // max concurrent steps; default 4
+	Resume   string // resume this run-id (or state.json path); empty starts a new run
 	Inputs   map[string]any
 	Vars     map[string]string // --var overrides of workflow env
 	Bus      *events.Bus
@@ -66,8 +68,31 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 	}
 	bus := opts.Bus
 
-	runID := newRunID()
-	ws, err := workspace.New(opts.BaseDir, runID)
+	// Resume: reload prior run state, reuse its workspace + run-id.
+	var (
+		runID       string
+		resumeCache map[string]*state.StepState
+	)
+	baseDir := opts.BaseDir
+	if baseDir == "" {
+		baseDir = "./.weftly"
+	}
+	if opts.Resume != "" {
+		prior, _, err := state.Load(filepath.Join(baseDir, "runs"), opts.Resume)
+		if err != nil {
+			return Result{}, err
+		}
+		runID = prior.RunID
+		resumeCache = map[string]*state.StepState{}
+		for id, s := range prior.Steps {
+			if s.Status == events.Success {
+				resumeCache[id] = s
+			}
+		}
+	} else {
+		runID = newRunID()
+	}
+	ws, err := workspace.New(baseDir, runID)
 	if err != nil {
 		return Result{}, fmt.Errorf("workspace: %w", err)
 	}
@@ -86,6 +111,12 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 
 	// State + report writers subscribe to the same bus every renderer sees.
 	sw := state.New(ws.Root, sec)
+	if opts.Resume != "" {
+		prior, _, _ := state.Load(filepath.Join(baseDir, "runs"), opts.Resume)
+		if prior != nil {
+			sw.Adopt(prior)
+		}
+	}
 	rep := report.New(sec)
 	bus.Subscribe(sw.Handle)
 	bus.Subscribe(rep.Handle)
@@ -129,6 +160,7 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 		Env:          baseEnv,
 		Steps:        stepViews,
 		StepMu:       &stepMu,
+		ResumeCache:  resumeCache,
 		Workspace:    ws,
 		Bus:          bus,
 		Expr:         ev,
@@ -166,6 +198,7 @@ type runCtx struct {
 	Env          map[string]string
 	Steps        map[string]expr.StepView
 	StepMu       *sync.Mutex // serialises reads/writes to Steps under parallel execution
+	ResumeCache  map[string]*state.StepState
 	Workspace    *workspace.Workspace
 	Bus          *events.Bus
 	Expr         *expr.Evaluator
@@ -186,6 +219,27 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 		rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.Skipped, Err: fmt.Errorf("%s", node.SkipReason)})
 		setStepView(rc, node.ID, expr.StepView{Status: string(events.Skipped), Outputs: map[string]any{}})
 		return events.Skipped
+	}
+
+	// Resume replay: if this step's success is on disk from a prior run,
+	// re-emit its outputs synthetically and mark the finish as Resumed=true
+	// so renderers/reports read the same as a fresh success.
+	if rc.ResumeCache != nil {
+		if prior, ok := rc.ResumeCache[node.ID]; ok && prior.Status == events.Success {
+			rc.Bus.Publish(events.StepStarted{StepID: node.ID, Name: node.Name, Action: node.Action})
+			for k, v := range prior.Outputs {
+				rc.Bus.Publish(events.StepOutput{StepID: node.ID, Key: k, Value: v})
+			}
+			rc.Bus.Publish(events.StepFinished{
+				StepID: node.ID, Status: events.Success, Duration: prior.Duration, Resumed: true,
+			})
+			outs := map[string]any{}
+			for k, v := range prior.Outputs {
+				outs[k] = v
+			}
+			setStepView(rc, node.ID, expr.StepView{Status: string(events.Success), Outputs: outs})
+			return events.Success
+		}
 	}
 
 	// Snapshot the step map under lock so parallel reads see a consistent

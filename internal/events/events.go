@@ -63,6 +63,10 @@ type StepFinished struct {
 	Status   Status
 	Duration time.Duration
 	Err      error
+	// Resumed is true when this step is being re-emitted from a prior run's
+	// state.json (via `weftly run --resume <run-id>`) rather than freshly
+	// executed. Renderers/reports use it to badge the step as "resumed".
+	Resumed bool
 }
 
 type SummaryEmitted struct {

@@ -27,6 +27,7 @@ func newRunCmd() *cobra.Command {
 		strict     bool
 		autoYes    bool
 		parallel   int
+		resume     string
 	)
 	cmd := &cobra.Command{
 		Use:   "run <workflow.yml>",
@@ -102,6 +103,7 @@ func newRunCmd() *cobra.Command {
 				Strict:   strict,
 				AutoYes:  autoYes,
 				Parallel: parallel,
+				Resume:   resume,
 				Inputs:   supplied,
 				Vars:     varOverrides,
 				Bus:      bus,
@@ -127,6 +129,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&strict, "strict", false, "treat inline expr-in-run as an error")
 	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-answer 'yes' to every prompt(type:confirm) step")
 	cmd.Flags().IntVarP(&parallel, "parallel", "p", 4, "maximum concurrent steps (needs edges are always honored)")
+	cmd.Flags().StringVar(&resume, "resume", "", "resume a prior run by id (or state.json path); skips successful steps")
 	return cmd
 }
 

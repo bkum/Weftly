@@ -69,6 +69,9 @@ func (r *Renderer) Handle(e events.Event) {
 		delete(r.active, ev.StepID)
 		glyph, col := statusGlyph(ev.Status)
 		msg := fmt.Sprintf("  %s %s %s in %s", r.color(glyph, col), ev.StepID, ev.Status, ev.Duration.Round(time.Millisecond))
+		if ev.Resumed {
+			msg += "  " + r.color("(resumed)", dim)
+		}
 		if ev.Err != nil {
 			msg += "  " + r.color(ev.Err.Error(), red)
 		}
