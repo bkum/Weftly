@@ -24,9 +24,9 @@ type AuditEntry struct {
 	Principal  string    `json:"principal"`
 	Method     string    `json:"method"`
 	Path       string    `json:"path"`
-	Workflow   string    `json:"workflow,omitempty"`   // populated when known (POST /runs body, schedule ref)
-	Schedule   string    `json:"schedule,omitempty"`   // populated on trigger/schedule endpoints
-	RunID      string    `json:"run_id,omitempty"`     // populated on POST /runs response, DELETE /runs/{id}
+	Workflow   string    `json:"workflow,omitempty"` // populated when known (POST /runs body, schedule ref)
+	Schedule   string    `json:"schedule,omitempty"` // populated on trigger/schedule endpoints
+	RunID      string    `json:"run_id,omitempty"`   // populated on POST /runs response, DELETE /runs/{id}
 	Status     int       `json:"status"`
 	RemoteAddr string    `json:"remote_addr,omitempty"`
 }
@@ -218,5 +218,3 @@ func extractCreateRunAudit(r *http.Request) (workflow, schedule string) {
 func extractTriggerAudit(r *http.Request) (workflow, schedule string) {
 	return "", r.PathValue("id")
 }
-
-
