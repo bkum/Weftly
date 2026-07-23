@@ -116,7 +116,9 @@ func printDiff(w interface{ Write([]byte) (int, error) }, path string, a, b []by
 	}
 }
 
-type stubWriter struct{ w interface{ Write([]byte) (int, error) } }
+type stubWriter struct {
+	w interface{ Write([]byte) (int, error) }
+}
 
 func (s *stubWriter) Write(p []byte) (int, error) { return s.w.Write(p) }
 
