@@ -26,6 +26,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(newValidateCmd())
 	root.AddCommand(newListCmd())
 	root.AddCommand(newServerCmd())
+	root.AddCommand(newImportGHACmd())
 	root.AddCommand(newVersionCmd())
 	return root
 }
