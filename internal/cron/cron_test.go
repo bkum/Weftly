@@ -17,17 +17,17 @@ func mustParse(t *testing.T, expr string) *Schedule {
 func TestParseErrors(t *testing.T) {
 	cases := []string{
 		"",
-		"* * * *",         // 4 fields
-		"* * * * * *",     // 6 fields
-		"@bogus",          // bad descriptor
-		"60 * * * *",      // minute out of range
-		"* 24 * * *",      // hour out of range
-		"* * 0 * *",       // dom < 1
-		"* * * 13 *",      // month > 12
-		"* * * * 8",       // dow > 7
-		"*/0 * * * *",     // zero step
-		"5-3 * * * *",     // reversed range
-		"* * * jam *",     // bad alias
+		"* * * *",     // 4 fields
+		"* * * * * *", // 6 fields
+		"@bogus",      // bad descriptor
+		"60 * * * *",  // minute out of range
+		"* 24 * * *",  // hour out of range
+		"* * 0 * *",   // dom < 1
+		"* * * 13 *",  // month > 12
+		"* * * * 8",   // dow > 7
+		"*/0 * * * *", // zero step
+		"5-3 * * * *", // reversed range
+		"* * * jam *", // bad alias
 	}
 	for _, c := range cases {
 		if _, err := Parse(c); err == nil {

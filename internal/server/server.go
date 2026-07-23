@@ -66,8 +66,8 @@ type Server struct {
 	runs  *runManager
 	srv   *http.Server
 	auth  Authenticator
-	store artifacts.Store       // nil unless Config.S3 is set
-	sched *scheduler.Scheduler  // nil unless Config.SchedulesFile is set
+	store artifacts.Store      // nil unless Config.S3 is set
+	sched *scheduler.Scheduler // nil unless Config.SchedulesFile is set
 }
 
 // New builds a Server. It loads the catalogue eagerly so mis-configuration

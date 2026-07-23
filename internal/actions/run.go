@@ -2,16 +2,15 @@ package actions
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -102,34 +101,35 @@ func (r runAction) Run(ctx context.Context, sc *StepContext) (Outputs, error) {
 			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		}
 	}
-	// WaitDelay is applied AFTER Process.Wait completes and forces the
-	// stdio pipe FDs closed if streamLines is still blocked on them
-	// (e.g. because a grandchild survived the kill briefly). Requires
-	// cmd.Wait to run before wg.Wait — see restructured order below.
+	// WaitDelay force-closes the stdio pipes if a grandchild survives
+	// the process-group kill and keeps them open (e.g. `sleep 5` inside
+	// a killed bash). exec joins on the internal copy goroutines
+	// created for cmd.Stdout / cmd.Stderr; WaitDelay bounds how long
+	// Wait will block waiting for them.
 	cmd.WaitDelay = 2 * time.Second
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, err
-	}
+	// Attach line-buffered writers directly. This is deliberately NOT
+	// StdoutPipe/StderrPipe: those docs warn that Wait closes the pipe
+	// once the process exits, racing any concurrent reader — under load
+	// (or GOMAXPROCS=1 + race detector, seen on CI) that race drops
+	// entire log lines and the "expected masked line" assertion in
+	// TestRunActionMasksSecretsInLogs fails intermittently. Assigning
+	// cmd.Stdout / cmd.Stderr instead makes exec spawn the copy
+	// goroutine internally, and Wait joins on that goroutine before
+	// returning — so every byte the child wrote is delivered.
+	stdoutLW := newLineWriter(events.Stdout, sc)
+	stderrLW := newLineWriter(events.Stderr, sc)
+	cmd.Stdout = stdoutLW
+	cmd.Stderr = stderrLW
+
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go streamLines(&wg, stdout, events.Stdout, sc)
-	go streamLines(&wg, stderr, events.Stderr, sc)
-
-	// Order matters: cmd.Wait first so that when the process exits Go can
-	// enforce WaitDelay against the stdio pipes; then wg.Wait, which now
-	// unblocks because scanner.Scan returns EOF on the force-closed pipe.
 	runErr := cmd.Wait()
-	wg.Wait()
+	// Flush any partial trailing line (no final newline) so `printf 'x'`
+	// still surfaces — same guarantee the old bufio.Scanner path gave.
+	stdoutLW.flush()
+	stderrLW.flush()
 
 	if ctx.Err() == context.DeadlineExceeded {
 		return nil, fmt.Errorf("run: timed out after %s", sc.Timeout)
@@ -204,20 +204,56 @@ func buildEnv(sc *StepContext, outputPath string) []string {
 	return env
 }
 
-// streamLines reads r line-by-line, masks secrets, and emits StepLog events.
-// A partial trailing line (no newline) is still emitted so `printf 'x'` isn't
-// swallowed.
-func streamLines(wg *sync.WaitGroup, r io.Reader, stream events.Stream, sc *StepContext) {
-	defer wg.Done()
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if sc.Secrets != nil {
-			line = sc.Secrets.Mask(line)
+// lineWriter is an io.Writer that splits incoming bytes on '\n' and
+// emits one StepLog per line, masking secrets first. exec's internal
+// copy goroutine calls Write repeatedly, so we buffer partial lines
+// across calls and flush the trailing remainder from Run() after Wait
+// returns.
+//
+// This replaces the previous StdoutPipe+bufio.Scanner path, which
+// leaked lines under race-detector + GOMAXPROCS=1 because cmd.Wait
+// closes the pipe once the process exits and the scanner goroutine
+// wasn't joined.
+type lineWriter struct {
+	stream events.Stream
+	sc     *StepContext
+	buf    bytes.Buffer
+}
+
+func newLineWriter(stream events.Stream, sc *StepContext) *lineWriter {
+	return &lineWriter{stream: stream, sc: sc}
+}
+
+func (lw *lineWriter) Write(p []byte) (int, error) {
+	lw.buf.Write(p)
+	for {
+		b := lw.buf.Bytes()
+		i := bytes.IndexByte(b, '\n')
+		if i < 0 {
+			break
 		}
-		sc.Emit(events.StepLog{StepID: sc.StepID, Stream: stream, Line: line})
+		line := string(b[:i])
+		lw.buf.Next(i + 1)
+		lw.emit(line)
 	}
+	return len(p), nil
+}
+
+// flush emits any pending partial line (no trailing newline). Called
+// once after cmd.Wait so `printf 'x'` still shows up.
+func (lw *lineWriter) flush() {
+	if lw.buf.Len() == 0 {
+		return
+	}
+	lw.emit(lw.buf.String())
+	lw.buf.Reset()
+}
+
+func (lw *lineWriter) emit(line string) {
+	if lw.sc.Secrets != nil {
+		line = lw.sc.Secrets.Mask(line)
+	}
+	lw.sc.Emit(events.StepLog{StepID: lw.sc.StepID, Stream: lw.stream, Line: line})
 }
 
 // parseOutputFile parses the $WEFTLY_OUTPUT file: `key=value` lines and

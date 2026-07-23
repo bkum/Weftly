@@ -14,17 +14,17 @@ import (
 
 func newServerCmd() *cobra.Command {
 	var (
-		addr        string
-		dir         string
-		runsDir     string
-		token       string
-		authFile    string
-		s3Endpoint  string
-		s3Region    string
-		s3Bucket    string
-		s3Prefix    string
-		s3AccessKey string
-		s3SecretKey string
+		addr          string
+		dir           string
+		runsDir       string
+		token         string
+		authFile      string
+		s3Endpoint    string
+		s3Region      string
+		s3Bucket      string
+		s3Prefix      string
+		s3AccessKey   string
+		s3SecretKey   string
 		s3Plaintext   bool
 		schedulesFile string
 	)
