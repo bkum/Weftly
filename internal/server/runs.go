@@ -26,7 +26,7 @@ type runRecord struct {
 
 	mu       sync.RWMutex
 	events   []events.Event // append-only replay log
-	closed   bool           // true once RunFinished has been observed
+	closed   bool           // set once engine.Run has fully returned
 	waiters  []chan events.Event
 	finished chan struct{}
 }
@@ -41,32 +41,46 @@ func newRunRecord(id, workflow string, inputs map[string]any) *runRecord {
 }
 
 // handle is the run's bus subscriber. It appends to the replay log and
-// fans out to any live SSE waiters, closing them once RunFinished arrives.
+// fans out to any live SSE waiters. It does NOT close the waiter channels
+// on RunFinished — that job belongs to markClosed, which the runManager
+// calls only after engine.Run has fully returned. Reason: other bus
+// subscribers (state.Writer, report) may still be flushing state.json /
+// report.html when RunFinished lands on this subscriber; closing the SSE
+// stream before those writes finish lets a client race the disk and
+// observe a "running" status in a GET /runs/:id that follows immediately.
 func (r *runRecord) handle(e events.Event) {
 	r.mu.Lock()
 	r.events = append(r.events, e)
 	waiters := append([]chan events.Event(nil), r.waiters...)
-	if _, ok := e.(events.RunFinished); ok {
-		r.closed = true
-	}
 	r.mu.Unlock()
 
 	for _, w := range waiters {
-		// non-blocking send; a slow reader drops events, they'll refresh
+		// Non-blocking send; a slow reader drops events, they'll refresh
 		// from state.json on reconnect.
 		select {
 		case w <- e:
 		default:
 		}
 	}
+}
+
+// markClosed flips the record to "no more events, close all SSE waiters".
+// Called by runManager once engine.Run has fully returned — guarantees
+// state.Writer and report.Write have completed before any SSE reader can
+// observe end-of-stream and pivot to the state endpoint.
+func (r *runRecord) markClosed() {
+	r.mu.Lock()
 	if r.closed {
-		close(r.finished)
-		r.mu.Lock()
-		for _, w := range r.waiters {
-			close(w)
-		}
-		r.waiters = nil
 		r.mu.Unlock()
+		return
+	}
+	r.closed = true
+	waiters := r.waiters
+	r.waiters = nil
+	r.mu.Unlock()
+	close(r.finished)
+	for _, w := range waiters {
+		close(w)
 	}
 }
 
@@ -129,6 +143,9 @@ func (m *runManager) start(_ context.Context, wfID string, wf *schema.Workflow, 
 			Bus:     bus,
 		})
 		errCh <- err
+		// Only NOW is it safe to close SSE waiters: engine.Run has
+		// returned, so state.Writer + report have flushed disk.
+		rec.markClosed()
 	}()
 
 	select {
