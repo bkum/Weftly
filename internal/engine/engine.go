@@ -360,33 +360,85 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 	}
 
 	rc.Bus.Publish(events.StepStarted{StepID: node.ID, Name: node.Name, Action: node.Action})
-	start := time.Now()
 
-	stepCtx := ctx
-	var cancel context.CancelFunc
-	if node.Timeout > 0 {
-		stepCtx, cancel = context.WithTimeout(ctx, node.Timeout)
-		defer cancel()
+	// runOnce wraps a single attempt so the retry loop can call it
+	// without duplicating the timeout / stepCtx plumbing. Returns the
+	// action outputs on success, or (nil, cause, err) on failure — the
+	// caller decides whether to loop or surface a StepFinished.
+	runOnce := func() (actions.Outputs, events.Status, time.Duration, error) {
+		attemptStart := time.Now()
+		stepCtx := ctx
+		var cancel context.CancelFunc
+		if node.Timeout > 0 {
+			stepCtx, cancel = context.WithTimeout(ctx, node.Timeout)
+			defer cancel()
+		}
+		outs, err := act.Run(stepCtx, sc)
+		d := time.Since(attemptStart)
+		if err != nil {
+			if stepCtx.Err() == context.DeadlineExceeded {
+				return nil, events.TimedOut, d, err
+			}
+			return nil, events.Failed, d, err
+		}
+		return outs, events.Success, d, nil
 	}
 
-	outs, err := act.Run(stepCtx, sc)
-	dur := time.Since(start)
+	start := time.Now()
+	outs, cause, dur, err := runOnce()
+
+	// Retry loop. Attempts is 1-indexed against total; attempt==1 was
+	// the initial call above. Only loop while the observed cause is in
+	// the retryable set.
+	if err != nil && node.Retry != nil && retryHandles(node.Retry, cause) {
+		total := node.Retry.Attempts
+		for attempt := 1; attempt < total; attempt++ {
+			delay := retryDelay(node.Retry, attempt)
+			rc.Bus.Publish(events.StepRetry{
+				StepID:  node.ID,
+				Attempt: attempt,
+				Of:      total,
+				Delay:   delay,
+				Cause:   cause,
+				Err:     err,
+			})
+			select {
+			case <-ctx.Done():
+				// Run was cancelled while we were sleeping between
+				// attempts. Fall through to the normal failure path.
+				err = ctx.Err()
+				goto finishAttempts
+			case <-time.After(delay):
+			}
+			outs, cause, dur, err = runOnce()
+			if err == nil {
+				break
+			}
+			if !retryHandles(node.Retry, cause) {
+				break
+			}
+		}
+	}
+finishAttempts:
 
 	if err != nil {
-		if stepCtx.Err() == context.DeadlineExceeded {
-			rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.TimedOut, Duration: dur, Err: err})
+		if cause == events.TimedOut {
+			rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.TimedOut, Duration: time.Since(start), Err: err})
 			setStepView(rc, node.ID, expr.StepView{Status: string(events.TimedOut), Outputs: map[string]any{}})
 			return events.TimedOut
 		}
 		if node.ContinueOnError {
-			rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.FailedContinued, Duration: dur, Err: err})
+			rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.FailedContinued, Duration: time.Since(start), Err: err})
 			setStepView(rc, node.ID, expr.StepView{Status: string(events.FailedContinued), Outputs: map[string]any{}})
 			return events.FailedContinued
 		}
-		rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.Failed, Duration: dur, Err: err})
+		rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.Failed, Duration: time.Since(start), Err: err})
 		setStepView(rc, node.ID, expr.StepView{Status: string(events.Failed), Outputs: map[string]any{}})
 		return events.Failed
 	}
+	// Success: dur is the last attempt's duration, but StepFinished
+	// carries the wall-clock total so the report shows the true cost.
+	dur = time.Since(start)
 
 	// Merge in step-declared outputs (http/template outputs mapping). If the
 	// action populated sc.Response (http does), include it in the eval env.
@@ -478,3 +530,41 @@ func checkRequires(tools []string) error {
 
 // ensure imports we might not use in this file don't fail vet
 var _ = os.Environ
+
+// retryHandles reports whether a Retry policy covers the given
+// terminal cause. Empty `on:` defaults to {failed} — a step that hit
+// its explicit timeout is usually not what a retry loop is meant to
+// paper over.
+func retryHandles(r *schema.Retry, cause events.Status) bool {
+	if r == nil {
+		return false
+	}
+	set := r.On
+	if len(set) == 0 {
+		set = []string{"failed"}
+	}
+	for _, s := range set {
+		if s == string(cause) {
+			return true
+		}
+	}
+	return false
+}
+
+// retryDelay computes the wait before attempt N+1 (attempt is 1-indexed
+// against the loop counter used in executeStep). Backoff "" is
+// constant, "linear" scales by attempt count, "exponential" doubles.
+// A zero Delay stays zero — no accidental sleep from "linear * 0".
+func retryDelay(r *schema.Retry, attempt int) time.Duration {
+	if r == nil || r.Delay <= 0 {
+		return 0
+	}
+	switch r.Backoff {
+	case "linear":
+		return r.Delay * time.Duration(attempt)
+	case "exponential":
+		return r.Delay << (attempt - 1)
+	default:
+		return r.Delay
+	}
+}

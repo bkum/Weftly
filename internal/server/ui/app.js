@@ -343,6 +343,17 @@ async function renderRun(runID) {
         s.logs.appendChild(line);
         break;
       }
+      case "StepRetry": {
+        const s = ensureStep(ev.StepID);
+        s.logs.hidden = false;
+        const line = document.createElement("div");
+        line.className = "info";
+        const delay = Math.round((ev.Delay || 0) / 1e6);
+        line.textContent = `↻ retrying (attempt ${ev.Attempt + 1}/${ev.Of} in ${delay}ms) — ${ev.Cause}`;
+        s.logs.appendChild(line);
+        s.glyph.innerHTML = glyphs.running;
+        break;
+      }
       case "StepFinished": {
         const s = ensureStep(ev.StepID);
         s.glyph.innerHTML = glyphs[ev.Status] || "•";

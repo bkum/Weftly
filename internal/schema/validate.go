@@ -111,6 +111,24 @@ func validateSteps(wf *Workflow) Errors {
 		if s.Container != "" && s.ActionType != "run" {
 			errs = append(errs, Error{Line: line, Path: path + ".container", Message: "container: is only valid on a run step"})
 		}
+		if s.Retry != nil {
+			if s.Retry.Attempts < 2 {
+				errs = append(errs, Error{Line: line, Path: path + ".retry.attempts", Message: "attempts must be >= 2 (attempts=1 means no retry — omit the block instead)"})
+			}
+			if s.Retry.Attempts > 20 {
+				errs = append(errs, Error{Line: line, Path: path + ".retry.attempts", Message: "attempts must be <= 20 (guard against runaway loops)"})
+			}
+			switch s.Retry.Backoff {
+			case "", "linear", "exponential":
+			default:
+				errs = append(errs, Error{Line: line, Path: path + ".retry.backoff", Message: "backoff must be one of \"\" (constant), \"linear\", or \"exponential\""})
+			}
+			for _, on := range s.Retry.On {
+				if on != "failed" && on != "timed-out" {
+					errs = append(errs, Error{Line: line, Path: path + ".retry.on", Message: fmt.Sprintf("unknown status %q (allowed: failed, timed-out)", on)})
+				}
+			}
+		}
 	}
 
 	// needs references must exist and must not form a cycle.

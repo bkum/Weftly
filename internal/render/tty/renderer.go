@@ -76,6 +76,13 @@ func (r *Renderer) Handle(e events.Event) {
 			msg += "  " + r.color(ev.Err.Error(), red)
 		}
 		r.printf("%s\n", msg)
+	case events.StepRetry:
+		msg := fmt.Sprintf("  %s %s retrying (attempt %d/%d in %s) — %s",
+			r.color("↻", yellow), ev.StepID, ev.Attempt+1, ev.Of, ev.Delay.Round(time.Millisecond), ev.Cause)
+		if ev.Err != nil {
+			msg += ": " + r.color(ev.Err.Error(), dim)
+		}
+		r.printf("%s\n", msg)
 	case events.SummaryEmitted:
 		r.summaries = append(r.summaries, ev.Markdown)
 	case events.ArtifactUploaded:
