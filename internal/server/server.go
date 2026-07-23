@@ -19,6 +19,7 @@ import (
 
 	"github.com/bkum/weftly/internal/artifacts"
 	"github.com/bkum/weftly/internal/scheduler"
+	"github.com/bkum/weftly/internal/tracing"
 )
 
 // Config configures a server instance.
@@ -48,6 +49,9 @@ type Config struct {
 	// the server launches a scheduler goroutine that dispatches workflows
 	// on their cron cadence (spec §17). Empty disables scheduling.
 	SchedulesFile string
+	// OTELEndpoint, when set, enables OTLP/HTTP span export via
+	// internal/tracing.Init. Off by default.
+	OTELEndpoint string
 	// AuditFile is the append-only JSON-lines log of mutating requests
 	// (POST /runs, DELETE /runs/{id}, POST /schedules/*/trigger,
 	// POST /reload). Empty disables the on-disk log; the in-memory
@@ -120,6 +124,7 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	tracing.Init(cfg.OTELEndpoint, cfg.Logger)
 	s := &Server{
 		cfg:   cfg,
 		log:   cfg.Logger,

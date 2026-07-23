@@ -26,7 +26,9 @@ import (
 	"github.com/bkum/weftly/internal/schema"
 	"github.com/bkum/weftly/internal/secrets"
 	"github.com/bkum/weftly/internal/state"
+	"github.com/bkum/weftly/internal/tracing"
 	"github.com/bkum/weftly/internal/workspace"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // Options bundles run-time knobs.
@@ -166,6 +168,15 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 
 	bus.Publish(events.RunStarted{Workflow: wf.Name, RunID: runID, Workspace: ws.StepsDir})
 	runStart := time.Now()
+
+	// Wrap the whole run in a tracing span. tracing.Start returns a
+	// no-op when no exporter is configured, so this is free when the
+	// operator hasn't set --otel-endpoint.
+	ctx, runSpan := tracing.Start(ctx, "workflow.run",
+		attribute.String("weftly.workflow", wf.Name),
+		attribute.String("weftly.run_id", runID),
+	)
+	defer runSpan.End()
 
 	defaultShell := wf.Defaults.Shell
 	parallel := opts.Parallel
@@ -438,6 +449,12 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 	if !rc.SuppressLifecycle {
 		rc.Bus.Publish(events.StepStarted{StepID: node.ID, Name: node.Name, Action: node.Action})
 	}
+	stepCtx, stepSpan := tracing.Start(ctx, "workflow.step",
+		attribute.String("weftly.step_id", node.ID),
+		attribute.String("weftly.action", node.Action),
+	)
+	ctx = stepCtx
+	defer stepSpan.End()
 
 	// runOnce wraps a single attempt so the retry loop can call it
 	// without duplicating the timeout / stepCtx plumbing. Returns the

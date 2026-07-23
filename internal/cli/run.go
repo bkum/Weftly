@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	// register built-in actions via their init() side effects
 	_ "github.com/bkum/weftly/internal/actions"
@@ -13,22 +14,25 @@ import (
 	"github.com/bkum/weftly/internal/render/tty"
 	"github.com/bkum/weftly/internal/schema"
 	"github.com/bkum/weftly/internal/secrets"
+	"github.com/bkum/weftly/internal/tracing"
 	"github.com/spf13/cobra"
+	"log/slog"
 )
 
 func newRunCmd() *cobra.Command {
 	var (
-		inputs     []string
-		inputFile  string
-		vars       []string
-		dryRun     bool
-		jsonOutput bool
-		noColor    bool
-		strict     bool
-		autoYes    bool
-		parallel   int
-		resume     string
-		ciMode     bool
+		inputs       []string
+		inputFile    string
+		vars         []string
+		dryRun       bool
+		jsonOutput   bool
+		noColor      bool
+		strict       bool
+		autoYes      bool
+		parallel     int
+		resume       string
+		ciMode       bool
+		otelEndpoint string
 	)
 	cmd := &cobra.Command{
 		Use:   "run <workflow.yml>",
@@ -74,6 +78,13 @@ func newRunCmd() *cobra.Command {
 				}
 				return nil
 			}
+
+			tracing.Init(otelEndpoint, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+			defer func() {
+				sctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				_ = tracing.Shutdown(sctx)
+			}()
 
 			bus := events.NewBus()
 			sec := secrets.NewRegistry()
@@ -136,6 +147,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().IntVarP(&parallel, "parallel", "p", 4, "maximum concurrent steps (needs edges are always honored)")
 	cmd.Flags().StringVar(&resume, "resume", "", "resume a prior run by id (or state.json path); skips successful steps")
 	cmd.Flags().BoolVar(&ciMode, "ci", false, "CI-friendly output: no color, GitHub Actions style ::group::/::endgroup:: markers around each step")
+	cmd.Flags().StringVar(&otelEndpoint, "otel-endpoint", "", "OTLP/HTTP endpoint (e.g. http://collector:4318); enables per-run + per-step span export")
 	return cmd
 }
 
