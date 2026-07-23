@@ -18,10 +18,14 @@ func mustParseYAMLNode(t *testing.T, src string) *(interface{ Decode(any) error 
 }
 
 func TestWaitSucceedsOnFirstProbe(t *testing.T) {
+	// Use shell built-in `true` (rather than /bin/true) so this test
+	// doesn't hinge on where the binary sits on a given host — some
+	// CI runners have it under /usr/bin, and `sh -c /path` failed on
+	// macOS runners even though the file existed.
 	cfg := mustParseYAML(t, `
-command: /bin/true
+command: "true"
 interval: 10ms
-timeout: 200ms
+timeout: 1s
 `)
 	sc := &StepContext{
 		Config:  cfg,
@@ -41,9 +45,9 @@ timeout: 200ms
 
 func TestWaitTimesOut(t *testing.T) {
 	cfg := mustParseYAML(t, `
-command: /bin/false
-interval: 10ms
-timeout: 60ms
+command: "false"
+interval: 20ms
+timeout: 80ms
 `)
 	sc := &StepContext{
 		Config:  cfg,
