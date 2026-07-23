@@ -25,7 +25,8 @@ func newServerCmd() *cobra.Command {
 		s3Prefix    string
 		s3AccessKey string
 		s3SecretKey string
-		s3Plaintext bool
+		s3Plaintext   bool
+		schedulesFile string
 	)
 	cmd := &cobra.Command{
 		Use:   "server",
@@ -59,6 +60,7 @@ func newServerCmd() *cobra.Command {
 				Token:           token,
 				AuthFile:        authFile,
 				S3:              s3,
+				SchedulesFile:   schedulesFile,
 				ShutdownTimeout: 15 * time.Second,
 			})
 			if err != nil {
@@ -81,5 +83,6 @@ func newServerCmd() *cobra.Command {
 	cmd.Flags().StringVar(&s3AccessKey, "s3-access-key", "", "S3 access key (or WEFTLY_S3_ACCESS_KEY env)")
 	cmd.Flags().StringVar(&s3SecretKey, "s3-secret-key", "", "S3 secret key (or WEFTLY_S3_SECRET_KEY env)")
 	cmd.Flags().BoolVar(&s3Plaintext, "s3-plaintext", false, "talk http to the S3 endpoint (dev-only, e.g. local MinIO)")
+	cmd.Flags().StringVar(&schedulesFile, "schedules", "", "path to schedules.yaml (enables cron-driven runs); reload with SIGHUP or POST /reload")
 	return cmd
 }
