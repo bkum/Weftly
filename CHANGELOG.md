@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-23
+
+Phase 3: multi-tenant server. RBAC, run history, remote artifact store,
+cron-driven schedules, opt-in container executor, GitHub Actions
+ingestion, cancel-run endpoint + Schedules SPA page. Under the hood a
+race in the shell-step log path (`StdoutPipe` + Wait) that intermittently
+dropped lines under `GOMAXPROCS=1 -race` on CI is fixed by moving to
+`cmd.Stdout = *lineWriter`.
+
+### Added — Phase 3
+
+- **RBAC.** `--auth-file weftly.yaml` maps opaque tokens → named
+  principals → roles → workflow allowlists (or `workflows: "*"`).
+  Roles can be flagged `admin: true` to unlock `POST /reload`.
+  All catalogue / run endpoints filter by the principal's allowlist,
+  so a caller never sees workflows or runs they can't touch.
+- **Run history.** `GET /runs` returns every run persisted on disk
+  (newest first, optional `?workflow=<id>` filter). The SPA gained
+  a Run History page and each workflow-detail page shows its recent
+  runs strip.
+- **Remote artifact store.** `--s3-endpoint / --s3-bucket / --s3-prefix /
+  --s3-access-key / --s3-secret-key / --s3-plaintext` mirror every
+  `upload` action's output to an S3-compatible bucket (AWS, MinIO, R2,
+  Spaces). `GET /runs/{id}/artifacts/{name}` transparently falls back
+  to the bucket when the local file is absent (after retention pruning).
+  Remote-store failures are logged, never fatal — the local copy is
+  authoritative.
+- **Scheduled runs.** `weftly server --schedules schedules.yaml` starts
+  a per-minute cron scheduler that dispatches catalogue workflows on
+  their cadence. Ships with an in-tree cron parser (5 fields + `@hourly
+  / @daily / @weekly / @monthly / @yearly` descriptors) so no runtime
+  dep is added. New endpoints: `GET /schedules`, `GET /schedules/{id}`,
+  `POST /schedules/{id}/trigger`. `POST /reload` + `SIGHUP` also re-read
+  `schedules.yaml`. Bad cron on one entry surfaces as `parse_error` on
+  that entry, not a whole-file reject.
+- **Container executor.** New `container: <image>` field on a `run:`
+  step wraps the shell in `podman run` / `docker run` (podman preferred,
+  docker fallback). Workspace, script, and `$WEFTLY_OUTPUT` are
+  bind-mounted; env vars validated as POSIX identifiers before
+  `-e KEY=VAL`; `--network=none` by default. No engine on `$PATH` →
+  actionable error, never silent fallback to host exec.
+- **`weftly import-gha`** ingests a GitHub Actions workflow YAML and
+  emits an equivalent weftly workflow to stdout (or `--out`).
+  Translation notes for every unsupported construct (`uses:`, `matrix:`,
+  `on:`, GHA-only expression helpers, ...) go to stderr; the emitted
+  YAML is always re-validated against `schema.Validate` before writing.
+- **`DELETE /runs/{id}`** cancels an in-flight run. Bound to a Cancel
+  button in the SPA that appears while the run is live and hides on
+  RunFinished. Cancelling a completed run is idempotent (200 with
+  `already_finished:true`).
+- **Schedules page** in the SPA — sidebar entry + per-schedule row with
+  id, workflow, cron, next-fire, last-error, and a Trigger-now button.
+
+### Fixed — Phase 3
+
+- `actions/run`: dropped `StdoutPipe` + external scanner goroutines in
+  favor of `cmd.Stdout = *lineWriter`. The previous pattern raced
+  `cmd.Wait` closing the pipe against our reader — under
+  `GOMAXPROCS=1 + -race` on CI, whole log lines could vanish, which
+  made `TestRunActionMasksSecretsInLogs` flake intermittently on both
+  ubuntu and macOS runners.
+- `actions/run` timeout path already forced `SIGKILL` to the process
+  group with a `cmd.WaitDelay` guard; that stays in place for the new
+  writer path.
+
 ### Added — Phase 2
 
 - **`prompt` action** replaces the Phase 1 stub. Supports `text`,
@@ -94,5 +159,6 @@ Initial Phase 1 release.
   self-contained `report.html`.
 - CLI: `run`, `validate`, `list`, `version`.
 
-[Unreleased]: https://github.com/bkum/weftly/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/bkum/weftly/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/bkum/weftly/releases/tag/v0.3.0
 [0.1.0]: https://github.com/bkum/weftly/releases/tag/v0.1.0

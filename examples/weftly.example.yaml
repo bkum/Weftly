@@ -1,0 +1,40 @@
+# weftly.example.yaml — template for `weftly server --auth-file ...`
+#
+# RBAC config: opaque tokens → named principals → roles → workflow ACLs.
+# Every listing endpoint (/workflows, /runs, /schedules) filters by the
+# caller's allowlist, so a token can't discover jobs it can't run.
+#
+# Token entries under 12 characters are rejected at load time — treat
+# these like any other secret. Never commit real tokens.
+
+tokens:
+  "opaque-token-alice-32-plus-chars":
+    name: alice
+    roles: [ops, admin]
+  "opaque-token-bob-32-plus-chars":
+    name: bob
+    roles: [dev]
+  "opaque-token-ci-agent-32-plus-chars":
+    name: ci-agent
+    roles: [ci]
+
+roles:
+  # `admin: true` unlocks POST /reload.
+  admin:
+    admin: true
+    workflows: "*"
+
+  # Full-catalogue access, but no reload.
+  ops:
+    workflows: "*"
+
+  # Explicit allowlist — the safe default for developer tokens.
+  dev:
+    workflows:
+      - petclinic-onboarding
+      - dev-smoke
+
+  # CI system that only ever runs one workflow.
+  ci:
+    workflows:
+      - release-audit

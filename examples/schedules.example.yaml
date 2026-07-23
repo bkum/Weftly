@@ -1,0 +1,33 @@
+# schedules.example.yaml — template for `weftly server --schedules ...`
+#
+# Each entry pins one catalogue workflow to a cron cadence. IDs are
+# arbitrary but must be unique. Bad cron on one entry surfaces as
+# parse_error on that entry only; the rest still load.
+
+schedules:
+  # 5-field cron (minute hour day-of-month month day-of-week).
+  - id: nightly-onboarding
+    workflow: petclinic-onboarding
+    cron: "0 2 * * *"                 # every day at 02:00
+    tz: America/Los_Angeles           # optional; defaults to UTC
+    inputs:
+      env_url: https://petclinic.example.com
+      # Secrets should NOT be committed — reference an env var interpolated
+      # by whatever launches weftly server (systemd, docker, k8s, ...).
+      api_key: ${WEFTLY_PETCLINIC_KEY}
+
+  # Descriptors are supported for the common cases.
+  - id: hourly-heartbeat
+    workflow: dev-smoke
+    cron: "@hourly"
+
+  # Effectively manual — POST /schedules/on-demand-restore/trigger to fire.
+  - id: on-demand-restore
+    workflow: backup-restore
+    cron: "@yearly"
+
+  # Toggle without deleting the row.
+  - id: retired-nightly
+    workflow: legacy-thing
+    cron: "0 3 * * *"
+    disabled: true
