@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -100,26 +101,20 @@ func withAccessLog(h http.Handler, log *slog.Logger) http.Handler {
 	})
 }
 
-// sanitizeForLog scrubs bytes that could forge log-entry boundaries when
-// the value is subsequently written to a text-format log. slog's text
-// handler already quotes control characters, but CodeQL flags the raw
-// pattern regardless — and being explicit here makes the intent obvious
-// to a human reader too.
+// sanitizeForLog neutralises log-forging bytes (CR/LF and other control
+// chars) in user-controlled strings before they hit the logger. It wraps
+// strconv.Quote — which CodeQL's taint model recognises as a log-injection
+// sanitiser — so the analyser sees a clean flow. The extra length cap
+// keeps a hostile-long path from bloating log lines.
 func sanitizeForLog(s string) string {
 	const maxLen = 512
 	if len(s) > maxLen {
-		s = s[:maxLen]
+		s = s[:maxLen] + "…(truncated)"
 	}
-	b := make([]byte, 0, len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c < 0x20 || c == 0x7f {
-			b = append(b, '?')
-			continue
-		}
-		b = append(b, c)
-	}
-	return string(b)
+	// strconv.Quote returns a Go-quoted string with \x escapes for
+	// control chars, so a `\n` in s becomes the literal two characters
+	// `\` + `n` — no way to fake a log entry.
+	return strconv.Quote(s)
 }
 
 type loggingWriter struct {
