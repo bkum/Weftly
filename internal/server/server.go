@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/bkum/weftly/internal/artifacts"
+	"github.com/bkum/weftly/internal/scheduler"
 )
 
 // Config configures a server instance.
@@ -43,6 +44,10 @@ type Config struct {
 	// to this bucket and GET /runs/:id/artifacts/:name falls back to it
 	// when the local file is absent (e.g. after local retention pruning).
 	S3 *artifacts.S3Config
+	// SchedulesFile points at schedules.yaml. When set and non-empty
+	// the server launches a scheduler goroutine that dispatches workflows
+	// on their cron cadence (spec §17). Empty disables scheduling.
+	SchedulesFile string
 	// MaxBodyBytes caps request bodies to prevent trivial DoS.
 	// Default 1 MiB when zero.
 	MaxBodyBytes int64
@@ -61,7 +66,8 @@ type Server struct {
 	runs  *runManager
 	srv   *http.Server
 	auth  Authenticator
-	store artifacts.Store // nil unless Config.S3 is set
+	store artifacts.Store      // nil unless Config.S3 is set
+	sched *scheduler.Scheduler // nil unless Config.SchedulesFile is set
 }
 
 // New builds a Server. It loads the catalogue eagerly so mis-configuration
@@ -103,14 +109,55 @@ func New(cfg Config) (*Server, error) {
 		cfg.Logger.Info("server: S3 artifact store enabled",
 			"endpoint", cfg.S3.Endpoint, "bucket", cfg.S3.Bucket, "prefix", cfg.S3.KeyPrefix)
 	}
-	return &Server{
+	s := &Server{
 		cfg:   cfg,
 		log:   cfg.Logger,
 		cat:   cat,
 		runs:  newRunManager(cfg.RunsDir, cfg.Logger, store),
 		auth:  auth,
 		store: store,
-	}, nil
+	}
+	if cfg.SchedulesFile != "" {
+		if err := s.initScheduler(); err != nil {
+			return nil, err
+		}
+	}
+	return s, nil
+}
+
+// initScheduler loads schedules.yaml (or no-ops if the file is missing —
+// operators can create it later and SIGHUP-reload) and wires the
+// dispatch callback to the run manager. It does NOT start the ticker;
+// ListenAndServe does that once the HTTP server is listening.
+func (s *Server) initScheduler() error {
+	f, err := scheduler.LoadFile(s.cfg.SchedulesFile)
+	if err != nil {
+		return fmt.Errorf("server: schedules: %w", err)
+	}
+	entries := []scheduler.Entry{}
+	if f != nil {
+		entries = f.Schedules
+	}
+	sc := scheduler.New(s.log, func(ctx context.Context, wf string, inputs map[string]any) (string, error) {
+		entry := s.cat.get(wf)
+		if entry == nil {
+			return "", fmt.Errorf("scheduled workflow %q not in catalogue", wf)
+		}
+		rec, err := s.runs.start(ctx, wf, entry.Workflow, inputs)
+		if err != nil {
+			return "", err
+		}
+		return rec.ID, nil
+	})
+	if err := sc.SetSchedules(entries, time.Now()); err != nil {
+		return fmt.Errorf("server: schedules: %w", err)
+	}
+	s.sched = sc
+	s.log.Info("server: scheduler enabled",
+		"file", s.cfg.SchedulesFile,
+		"entries", len(entries),
+	)
+	return nil
 }
 
 // chooseAuthenticator picks between the single-token (Bearer) and the
@@ -150,6 +197,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /runs/{id}/events", s.handleRunEvents)
 	mux.HandleFunc("GET /runs/{id}/artifacts/{name}", s.handleArtifact)
 	mux.HandleFunc("POST /reload", s.handleReload)
+	mux.HandleFunc("GET /schedules", s.handleListSchedules)
+	mux.HandleFunc("GET /schedules/{id}", s.handleGetSchedule)
+	mux.HandleFunc("POST /schedules/{id}/trigger", s.handleTriggerSchedule)
 	// UI (unauthenticated shell; the SPA does authenticated API calls)
 	ui := uiHandler()
 	mux.Handle("GET /", ui)
@@ -192,9 +242,18 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 				continue
 			}
 			s.log.Info("SIGHUP reload", "workflows", len(s.cat.list()))
+			if s.sched != nil {
+				if err := s.reloadSchedules(); err != nil {
+					s.log.Error("SIGHUP schedule reload failed", "err", err)
+				}
+			}
 		}
 	}()
 	defer signal.Stop(hup)
+
+	if s.sched != nil {
+		go s.sched.Run(ctx)
+	}
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- s.srv.Serve(l) }()
@@ -213,6 +272,25 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		}
 		return nil
 	}
+}
+
+// reloadSchedules re-reads schedules.yaml and swaps the in-memory entry
+// set. Called from SIGHUP and (optionally) POST /reload — same failure
+// semantics: a bad file leaves the running scheduler untouched.
+func (s *Server) reloadSchedules() error {
+	f, err := scheduler.LoadFile(s.cfg.SchedulesFile)
+	if err != nil {
+		return err
+	}
+	entries := []scheduler.Entry{}
+	if f != nil {
+		entries = f.Schedules
+	}
+	if err := s.sched.SetSchedules(entries, time.Now()); err != nil {
+		return err
+	}
+	s.log.Info("schedules reloaded", "entries", len(entries))
+	return nil
 }
 
 // Addr returns the bound address, if the server is running.

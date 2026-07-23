@@ -77,7 +77,15 @@ func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Info("catalogue reloaded", "workflows", len(s.cat.list()))
-	writeJSON(w, http.StatusOK, map[string]any{"reloaded": true, "workflows": len(s.cat.list())})
+	resp := map[string]any{"reloaded": true, "workflows": len(s.cat.list())}
+	if s.sched != nil {
+		if err := s.reloadSchedules(); err != nil {
+			writeError(w, http.StatusInternalServerError, "schedules: "+err.Error())
+			return
+		}
+		resp["schedules"] = len(s.sched.States())
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // runVisibleTo reports whether the principal may access the given run —
