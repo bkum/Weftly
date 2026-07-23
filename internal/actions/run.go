@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/bkum/weftly/internal/events"
 	"gopkg.in/yaml.v3"
@@ -91,6 +92,14 @@ func (r runAction) Run(ctx context.Context, sc *StepContext) (Outputs, error) {
 	cmd.Dir = sc.Workdir
 	cmd.Env = buildEnv(sc, outputPath)
 	setupProcessGroup(cmd)
+	// WaitDelay caps how long Wait will block waiting for stdout/stderr
+	// pipes to close after the process exits. Without it, an orphaned
+	// grandchild (e.g. `sleep 5` inside a killed bash) keeps the pipe FDs
+	// open and our streamLines goroutines block until the grandchild dies
+	// on its own — defeating any per-step timeout. Setting a small delay
+	// lets Wait return promptly; Go closes the pipes forcibly at that
+	// point (available since Go 1.20).
+	cmd.WaitDelay = 500 * time.Millisecond
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -300,6 +309,10 @@ func setupProcessGroup(cmd *exec.Cmd) {
 	}
 }
 
+// killProcessGroup sends SIGKILL to the whole process group so that any
+// grandchild (curl in a subshell, sleep in a script) dies with the shell.
+// SIGTERM would give a shell a chance to trap, but on cancel we've already
+// blown the timeout and want the tree gone immediately.
 func killProcessGroup(cmd *exec.Cmd) {
 	if cmd.Process == nil {
 		return
@@ -313,5 +326,5 @@ func killProcessGroup(cmd *exec.Cmd) {
 		_ = cmd.Process.Kill()
 		return
 	}
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
 }

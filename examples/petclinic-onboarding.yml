@@ -1,0 +1,149 @@
+name: petclinic-onboarding
+description: >
+  Health-check a Spring PetClinic-shaped REST API, idempotently onboard a
+  pet owner with one pet and a scheduled visit, and emit an HTML report.
+
+# See https://github.com/spring-petclinic/spring-petclinic-rest for the
+# real REST surface this mirrors. The workflow is generic: swap `env_url`
+# for any endpoint that speaks the same JSON.
+
+requires: [curl, jq]
+
+inputs:
+  env_url:
+    description: "PetClinic base URL (e.g. http://localhost:9966/petclinic)"
+    required: true
+  api_key:
+    description: "Optional API key sent as X-API-Key"
+    secret: true
+    default: ""
+  owner_first:
+    description: "New owner first name"
+    default: "Jane"
+  owner_last:
+    description: "New owner last name"
+    default: "Doe"
+  pet_name:
+    description: "Pet to add for that owner"
+    default: "Rex"
+  pet_type:
+    description: "Pet species"
+    default: "dog"
+  visit_date:
+    description: "Visit date (YYYY-MM-DD)"
+    default: "2026-08-15"
+  visit_reason:
+    description: "Visit description"
+    default: "Annual checkup"
+
+defaults:
+  http:
+    timeout: 30s
+    headers:
+      X-API-Key: "${{ inputs.api_key }}"
+      Content-Type: application/json
+
+steps:
+  - id: health
+    name: Check PetClinic health
+    http:
+      GET: "${{ inputs.env_url }}/api/health"
+    assert: response.status == 200
+    outputs:
+      status: "${{ response.body.status }}"
+
+  - id: lookup
+    name: Look up existing owner (idempotency)
+    http:
+      GET: "${{ inputs.env_url }}/api/owners?lastName=${{ urlquery(inputs.owner_last) }}"
+    outputs:
+      exists: "${{ response.body.total > 0 }}"
+
+  - id: create
+    name: Create owner if absent
+    if: ${{ !steps.lookup.outputs.exists }}
+    http:
+      POST: "${{ inputs.env_url }}/api/owners"
+      body:
+        firstName: "${{ inputs.owner_first }}"
+        lastName:  "${{ inputs.owner_last }}"
+    outputs:
+      id: "${{ response.body.id }}"
+
+  - id: owner_id
+    name: Resolve owner id (created or existing) via curl+jq
+    run: |
+      if [ -n "$CREATED_ID" ]; then
+        echo "id=$CREATED_ID" >> "$WEFTLY_OUTPUT"
+      else
+        id=$(curl -sf -G "$ENV_URL/api/owners" \
+             --data-urlencode "lastName=$LAST" \
+             -H "X-API-Key: $KEY" | jq -r '.owners[0].id')
+        echo "id=$id" >> "$WEFTLY_OUTPUT"
+      fi
+    env:
+      CREATED_ID: "${{ steps.create.outputs.id }}"
+      ENV_URL:    "${{ inputs.env_url }}"
+      LAST:       "${{ inputs.owner_last }}"
+      KEY:        "${{ inputs.api_key }}"
+
+  - id: pet
+    name: Register pet
+    http:
+      POST: "${{ inputs.env_url }}/api/owners/${{ steps.owner_id.outputs.id }}/pets"
+      body:
+        name: "${{ inputs.pet_name }}"
+        type: "${{ inputs.pet_type }}"
+    outputs:
+      id: "${{ response.body.id }}"
+
+  - id: visit
+    name: Schedule visit
+    http:
+      POST: "${{ inputs.env_url }}/api/owners/${{ steps.owner_id.outputs.id }}/pets/${{ steps.pet.outputs.id }}/visits"
+      body:
+        date:        "${{ inputs.visit_date }}"
+        description: "${{ inputs.visit_reason }}"
+    outputs:
+      id: "${{ response.body.id }}"
+
+  - id: report
+    name: Render onboarding report
+    template:
+      inline: |
+        <!doctype html>
+        <html><head>
+          <meta charset="utf-8">
+          <title>PetClinic onboarding — {{ .owner_last }}</title>
+        </head><body>
+          <h1>PetClinic onboarding</h1>
+          <ul>
+            <li>Environment: <code>{{ .env }}</code></li>
+            <li>Owner: <strong>{{ .owner_first }} {{ .owner_last }}</strong> (<code>{{ .owner_id }}</code>)</li>
+            <li>Pet: <strong>{{ .pet_name }}</strong> ({{ .pet_type }}, <code>{{ .pet_id }}</code>)</li>
+            <li>Visit: <code>{{ .visit_id }}</code> on {{ .visit_date }} — {{ .visit_reason }}</li>
+          </ul>
+        </body></html>
+      dest: ./out/onboarding-report.html
+      vars:
+        env:          "${{ inputs.env_url }}"
+        owner_first:  "${{ inputs.owner_first }}"
+        owner_last:   "${{ inputs.owner_last }}"
+        owner_id:     "${{ steps.owner_id.outputs.id }}"
+        pet_name:     "${{ inputs.pet_name }}"
+        pet_type:     "${{ inputs.pet_type }}"
+        pet_id:       "${{ steps.pet.outputs.id }}"
+        visit_id:     "${{ steps.visit.outputs.id }}"
+        visit_date:   "${{ inputs.visit_date }}"
+        visit_reason: "${{ inputs.visit_reason }}"
+
+  - summary: |
+      ## PetClinic onboarding complete
+      - **Environment:** ${{ inputs.env_url }} (health: ${{ steps.health.outputs.status }})
+      - **Owner:** ${{ inputs.owner_first }} ${{ inputs.owner_last }} (`${{ steps.owner_id.outputs.id }}`)
+      - **Pet:** ${{ inputs.pet_name }} — `${{ steps.pet.outputs.id }}`
+      - **Visit:** `${{ steps.visit.outputs.id }}` on ${{ inputs.visit_date }}
+
+  - upload:
+      path: ./out/onboarding-report.html
+      name: onboarding-report

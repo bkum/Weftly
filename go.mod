@@ -1,6 +1,6 @@
 module github.com/bkum/weftly
 
-go 1.24.7
+go 1.25
 
 require (
 	github.com/expr-lang/expr v1.17.8 // indirect

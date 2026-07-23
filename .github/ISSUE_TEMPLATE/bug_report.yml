@@ -1,0 +1,59 @@
+name: Bug report
+description: Something in Weftly is broken or behaves unexpectedly.
+title: "bug: <short summary>"
+labels: [bug, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file this. Please **do not** use this
+        form for security issues — follow the private disclosure process in
+        [SECURITY.md](../blob/main/SECURITY.md) instead.
+
+  - type: input
+    id: version
+    attributes:
+      label: Weftly version
+      description: Output of `weftly version`.
+      placeholder: "weftly 0.1.0 (commit abcdef, built 2026-07-22)"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS + arch
+      placeholder: "linux/amd64 (Ubuntu 24.04)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Minimal workflow that reproduces the issue
+      description: Please redact secrets before pasting.
+      render: yaml
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the command you ran and any log output.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Anything else worth knowing — environment quirks, related issues.
