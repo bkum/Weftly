@@ -33,7 +33,7 @@ jobs:
             echo "::error::tag $tag is not a valid semver v-prefixed tag"
             exit 1
           fi
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: '~> v2'
