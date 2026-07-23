@@ -45,7 +45,28 @@ func Parse(r io.Reader) (*Workflow, error) {
 	if err := decodeSteps(&root, &wf); err != nil {
 		return nil, err
 	}
+	if err := decodeStepSequence(&root, "cleanup", wf.Cleanup); err != nil {
+		return nil, err
+	}
 	return &wf, nil
+}
+
+// decodeStepSequence populates ActionType/ActionNode for the steps in a
+// top-level list other than `steps:` (currently just `cleanup:`).
+// Delegates to the same per-step walker as decodeSteps.
+func decodeStepSequence(root *yaml.Node, key string, steps []Step) error {
+	doc := root
+	if doc.Kind == yaml.DocumentNode && len(doc.Content) > 0 {
+		doc = doc.Content[0]
+	}
+	if doc.Kind != yaml.MappingNode {
+		return nil
+	}
+	seq := lookupKey(doc, key)
+	if seq == nil || seq.Kind != yaml.SequenceNode {
+		return nil
+	}
+	return decodeStepMappings(seq, steps, key)
 }
 
 // decodeSteps finds the top-level `steps:` sequence and, for each step
@@ -65,18 +86,25 @@ func decodeSteps(root *yaml.Node, wf *Workflow) error {
 	if stepsNode.Kind != yaml.SequenceNode {
 		return fmt.Errorf("line %d: `steps` must be a sequence", stepsNode.Line)
 	}
-	if len(wf.Steps) != len(stepsNode.Content) {
-		return fmt.Errorf("internal: step slice length %d does not match yaml sequence %d", len(wf.Steps), len(stepsNode.Content))
+	return decodeStepMappings(stepsNode, wf.Steps, "steps")
+}
+
+// decodeStepMappings is the per-step walker shared by decodeSteps and
+// decodeStepSequence. Panics-safe: length mismatch between the parsed
+// slice and the yaml sequence is a hard "internal" error.
+func decodeStepMappings(seq *yaml.Node, steps []Step, label string) error {
+	if len(steps) != len(seq.Content) {
+		return fmt.Errorf("internal: %s slice length %d does not match yaml sequence %d", label, len(steps), len(seq.Content))
 	}
 	actionSet := make(map[string]struct{}, len(actionKeys))
 	for _, k := range actionKeys {
 		actionSet[k] = struct{}{}
 	}
-	for i, m := range stepsNode.Content {
+	for i, m := range seq.Content {
 		if m.Kind != yaml.MappingNode {
 			return fmt.Errorf("line %d: each step must be a mapping", m.Line)
 		}
-		wf.Steps[i].Source = m
+		steps[i].Source = m
 		var found []string
 		var primary string
 		var primaryNode *yaml.Node
@@ -115,8 +143,8 @@ func decodeSteps(root *yaml.Node, wf *Workflow) error {
 			}
 			found = []string{primary}
 		}
-		wf.Steps[i].ActionType = primary
-		wf.Steps[i].ActionNode = primaryNode
+		steps[i].ActionType = primary
+		steps[i].ActionNode = primaryNode
 		if len(found) > 1 {
 			return fmt.Errorf("line %d: step must have exactly one action key, found %v", m.Line, found)
 		}

@@ -194,6 +194,16 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 		return runStep(ctx, node, rc)
 	})
 
+	// Cleanup pass. Runs sequentially (no needs: edges among cleanup
+	// steps in v0.4), sees the aggregated overallStatus via
+	// expr.Env.Run.Status so `if: ${{ failure() }}` gates work, and
+	// uses a detached child context so a run cancelled mid-graph still
+	// gets its cleanup — the alternative (skipping cleanup on
+	// cancellation) is exactly the case where cleanup matters most.
+	if len(wf.Cleanup) > 0 {
+		runCleanup(ctx, wf.Cleanup, rc, overallStatus)
+	}
+
 	dur := time.Since(runStart)
 	bus.Publish(events.RunFinished{Status: overallStatus, Duration: dur})
 
@@ -228,6 +238,11 @@ type runCtx struct {
 	AutoYes       bool
 	RunID         string
 	ArtifactStore actions.RemoteArtifactStore
+	// CleanupStatus is empty during main-graph execution; set to the
+	// run's aggregate final status when runCleanup dispatches a
+	// cleanup step. Feeds success()/failure() so cleanup gates work.
+	CleanupStatus    string
+	CleanupCancelled bool
 }
 
 // runStep resolves per-step context, dispatches to the action, and updates
@@ -278,7 +293,12 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 		Steps:   stepsSnap,
 		Env:     rc.Env,
 		Secrets: map[string]string{}, // secrets exposed as-is to expressions; renderer masks output
-		Run:     expr.RunMeta{ID: rc.RunID, Workspace: rc.Workspace.StepsDir},
+		Run: expr.RunMeta{
+			ID:        rc.RunID,
+			Workspace: rc.Workspace.StepsDir,
+			Status:    rc.CleanupStatus,    // empty during main graph, set during cleanup
+			Cancelled: rc.CleanupCancelled, // ditto
+		},
 	}
 	// Give expressions access to secrets by name too.
 	for _, name := range secretNames(rc.Workflow) {
@@ -528,6 +548,61 @@ func checkRequires(tools []string) error {
 
 // ensure imports we might not use in this file don't fail vet
 var _ = os.Environ
+
+// runCleanup executes each cleanup step in schema order. The step's
+// `if:` expression is evaluated against the final run status via the
+// updated expr.Env.Run.Status, so `if: ${{ failure() || cancelled() }}`
+// behaves as documented. Cleanup steps ignore the retry: block (loops
+// on top of a "we're already tearing down" pass are more surprising
+// than useful) but honour timeout: and continue-on-error.
+//
+// A cleanup step's failure never changes the run's aggregate status —
+// the main graph already decided the run's outcome. Failures still
+// emit StepFinished{Failed} so state.json + report.html show them.
+func runCleanup(parentCtx context.Context, steps []schema.Step, rc runCtx, finalStatus events.Status) {
+	// Detached context so a run that was cancelled mid-graph still runs
+	// its cleanup — that's precisely the "please tear this down" case.
+	// A separate 60 s cap ensures a wedged cleanup can't hang the process.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	statusStr := string(finalStatus)
+	cancelled := parentCtx.Err() != nil
+	for i := range steps {
+		s := &steps[i]
+		// Cleanup steps are compiled ad-hoc so the loop can propagate
+		// the run's aggregate status into every expression evaluation.
+		node := &ir.StepNode{
+			ID:              nonEmpty(s.ID, fmt.Sprintf("cleanup_%d", i+1)),
+			Name:            s.Name,
+			Action:          s.ActionType,
+			Config:          s,
+			If:              s.If,
+			Env:             s.Env,
+			ContinueOnError: s.ContinueOnError,
+			Timeout:         s.Timeout,
+			Shell:           s.Shell,
+			Container:       s.Container,
+			OutputsMap:      s.Outputs,
+		}
+		// Snapshot the shared env into a per-call view with the run's
+		// aggregate status set. runStep re-derives envForExpr from
+		// rc, so we mutate rc's fields transiently via a wrapper.
+		rc2 := rc
+		rc2.CleanupStatus = statusStr
+		rc2.CleanupCancelled = cancelled
+		_ = runStep(ctx, node, rc2)
+	}
+}
+
+func nonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
 
 // retryHandles reports whether a Retry policy covers the given
 // terminal cause. Empty `on:` defaults to {failed} — a step that hit

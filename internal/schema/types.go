@@ -51,6 +51,11 @@ type Workflow struct {
 	Env         map[string]string `yaml:"env"`
 	Defaults    Defaults          `yaml:"defaults"`
 	Steps       []Step            `yaml:"steps"`
+	// Cleanup runs sequentially after the main graph completes,
+	// regardless of the run's outcome. Cleanup steps get success() /
+	// failure() / cancelled() populated from the run's aggregate
+	// status so `if:` gates work.
+	Cleanup     []Step            `yaml:"cleanup"`
 
 	// Source retains the parsed YAML root node for line-number-aware error
 	// reporting. Nil after a bare struct construction (e.g. tests).

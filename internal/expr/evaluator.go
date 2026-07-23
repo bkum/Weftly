@@ -22,10 +22,26 @@ import (
 	"github.com/expr-lang/expr/vm"
 )
 
-// RunMeta carries per-run metadata exposed as `run.*`.
+// RunMeta carries per-run metadata exposed as `run.*` plus the two
+// pieces of state consumed by status functions (success(), failure(),
+// cancelled()).
+//
+// Status is the run's aggregate outcome so far. During main-graph
+// execution it stays "success" — cascade-skip already prevents downstream
+// steps from running past a fatal upstream, so a status-function check
+// mid-run adds nothing. The engine sets Status to the true final value
+// before running the cleanup: block, which is the whole point of the
+// helpers.
+//
+// Cancelled reports whether the run's context was cancelled (SIGINT,
+// DELETE /runs/{id}, or an outer deadline). Cleanup steps typically use
+// `if: ${{ failure() || cancelled() }}` to run whenever the primary
+// path didn't reach a clean success.
 type RunMeta struct {
 	ID        string
 	Workspace string
+	Status    string // "" | "success" | "failed" | "timed-out"
+	Cancelled bool
 }
 
 // StepView is the read-only view of a completed step exposed as `steps.<id>`.
@@ -214,6 +230,8 @@ func (e *Evaluator) envMap(env Env) map[string]any {
 		"run": map[string]any{
 			"id":        env.Run.ID,
 			"workspace": env.Run.Workspace,
+			"status":    env.Run.Status,
+			"cancelled": env.Run.Cancelled,
 		},
 	}
 	if env.Response != nil {
@@ -224,6 +242,20 @@ func (e *Evaluator) envMap(env Env) map[string]any {
 	for name, fn := range builtinFuncs() {
 		m[name] = fn
 	}
+	// Status functions close over this call's env snapshot; they're
+	// re-registered per envMap() call so the value they see always
+	// matches the evaluator's current invocation, never a stale one
+	// from the compile-time cache.
+	status := env.Run.Status
+	cancelled := env.Run.Cancelled
+	m["success"] = func(args ...any) (any, error) {
+		return status == "" || status == "success", nil
+	}
+	m["failure"] = func(args ...any) (any, error) {
+		return status == "failed" || status == "timed-out", nil
+	}
+	m["always"] = func(args ...any) (any, error) { return true, nil }
+	m["cancelled"] = func(args ...any) (any, error) { return cancelled, nil }
 	return m
 }
 
