@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"bufio"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -57,7 +58,9 @@ func TestSSETokenViaQueryString(t *testing.T) {
 	}
 	_ = json.Unmarshal(body, &rr)
 
-	// SSE via ?token= (no Authorization header).
+	// SSE via ?token= (no Authorization header). Drain until RunFinished
+	// so the engine goroutine has fully released the runs tempdir before
+	// t.Cleanup tries to RemoveAll it.
 	sseResp, err := http.Get(ts.URL + "/runs/" + rr.RunID + "/events?token=tk")
 	if err != nil {
 		t.Fatal(err)
@@ -65,5 +68,12 @@ func TestSSETokenViaQueryString(t *testing.T) {
 	defer sseResp.Body.Close()
 	if sseResp.StatusCode != 200 {
 		t.Fatalf("want 200, got %d", sseResp.StatusCode)
+	}
+	sc := bufio.NewScanner(sseResp.Body)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
+		if strings.Contains(sc.Text(), `"RunFinished"`) {
+			break
+		}
 	}
 }

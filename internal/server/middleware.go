@@ -63,7 +63,7 @@ func withAuth(h http.Handler, a Authenticator, log *slog.Logger, exempt ...strin
 		if !ok {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="weftly"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			log.Info("unauthorized", "path", r.URL.Path, "remote", r.RemoteAddr)
+			log.Info("unauthorized", "path", sanitizeForLog(r.URL.Path), "remote", sanitizeForLog(r.RemoteAddr))
 			return
 		}
 		r = r.WithContext(withPrincipal(r.Context(), principal))
@@ -90,14 +90,36 @@ func withAccessLog(h http.Handler, log *slog.Logger) http.Handler {
 		lw := &loggingWriter{ResponseWriter: w, status: 200}
 		h.ServeHTTP(lw, r)
 		log.Info("http",
-			"method", r.Method,
-			"path", r.URL.Path,
+			"method", sanitizeForLog(r.Method),
+			"path", sanitizeForLog(r.URL.Path),
 			"status", lw.status,
 			"bytes", lw.bytes,
 			"duration_ms", time.Since(start).Milliseconds(),
 			"principal", principalFromContext(r.Context()),
 		)
 	})
+}
+
+// sanitizeForLog scrubs bytes that could forge log-entry boundaries when
+// the value is subsequently written to a text-format log. slog's text
+// handler already quotes control characters, but CodeQL flags the raw
+// pattern regardless — and being explicit here makes the intent obvious
+// to a human reader too.
+func sanitizeForLog(s string) string {
+	const maxLen = 512
+	if len(s) > maxLen {
+		s = s[:maxLen]
+	}
+	b := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c == 0x7f {
+			b = append(b, '?')
+			continue
+		}
+		b = append(b, c)
+	}
+	return string(b)
 }
 
 type loggingWriter struct {
