@@ -23,6 +23,8 @@ type StepNode struct {
 	Timeout         time.Duration
 	Shell           string
 	Container       string            // opt-in container image for run steps
+	Retry           *schema.Retry     // opt-in retry policy
+	ForEach         string            // expression: list to fan out over
 	OutputsMap      map[string]string // declared outputs for http/template
 
 	// SkipReason is set by the scheduler when this node is being

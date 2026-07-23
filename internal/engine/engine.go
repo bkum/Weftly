@@ -26,7 +26,9 @@ import (
 	"github.com/bkum/weftly/internal/schema"
 	"github.com/bkum/weftly/internal/secrets"
 	"github.com/bkum/weftly/internal/state"
+	"github.com/bkum/weftly/internal/tracing"
 	"github.com/bkum/weftly/internal/workspace"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // Options bundles run-time knobs.
@@ -167,6 +169,15 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 	bus.Publish(events.RunStarted{Workflow: wf.Name, RunID: runID, Workspace: ws.StepsDir})
 	runStart := time.Now()
 
+	// Wrap the whole run in a tracing span. tracing.Start returns a
+	// no-op when no exporter is configured, so this is free when the
+	// operator hasn't set --otel-endpoint.
+	ctx, runSpan := tracing.Start(ctx, "workflow.run",
+		attribute.String("weftly.workflow", wf.Name),
+		attribute.String("weftly.run_id", runID),
+	)
+	defer runSpan.End()
+
 	defaultShell := wf.Defaults.Shell
 	parallel := opts.Parallel
 	if parallel < 1 {
@@ -193,6 +204,16 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 	overallStatus := schedule(ctx, graph, parallel, func(ctx context.Context, node *ir.StepNode) events.Status {
 		return runStep(ctx, node, rc)
 	})
+
+	// Cleanup pass. Runs sequentially (no needs: edges among cleanup
+	// steps in v0.4), sees the aggregated overallStatus via
+	// expr.Env.Run.Status so `if: ${{ failure() }}` gates work, and
+	// uses a detached child context so a run cancelled mid-graph still
+	// gets its cleanup — the alternative (skipping cleanup on
+	// cancellation) is exactly the case where cleanup matters most.
+	if len(wf.Cleanup) > 0 {
+		runCleanup(ctx, wf.Cleanup, rc, overallStatus)
+	}
 
 	dur := time.Since(runStart)
 	bus.Publish(events.RunFinished{Status: overallStatus, Duration: dur})
@@ -228,6 +249,20 @@ type runCtx struct {
 	AutoYes       bool
 	RunID         string
 	ArtifactStore actions.RemoteArtifactStore
+	// CleanupStatus is empty during main-graph execution; set to the
+	// run's aggregate final status when runCleanup dispatches a
+	// cleanup step. Feeds success()/failure() so cleanup gates work.
+	CleanupStatus    string
+	CleanupCancelled bool
+	// ForEachIter, when non-nil, means we're inside one iteration of a
+	// for-each expansion. runStep injects it into envForExpr as `each`
+	// and skips re-expansion. Nil for regular steps.
+	ForEachIter *expr.EachContext
+	// SuppressLifecycle causes runStep to skip publishing the outer
+	// StepStarted/StepFinished events and skip the setStepView writes.
+	// Used when the outer for-each wrapper is already tracking the
+	// step's lifecycle and each iteration must not double-emit.
+	SuppressLifecycle bool
 }
 
 // runStep resolves per-step context, dispatches to the action, and updates
@@ -264,6 +299,48 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 		}
 	}
 
+	// For-each expansion. When ForEach is set and we're at the outer
+	// invocation (rc.ForEachIter == nil), evaluate the expression to a
+	// list, emit one wrapping StepStarted, then recurse per element
+	// with rc.ForEachIter populated. Aggregate outcome is the worst
+	// element status (Failed > TimedOut > Success). Iterations run
+	// sequentially; parallelism would need per-iteration StepView keys
+	// and is deferred.
+	if node.ForEach != "" && rc.ForEachIter == nil {
+		rc.Bus.Publish(events.StepStarted{StepID: node.ID, Name: node.Name, Action: node.Action})
+		list, ferr := evaluateForEach(rc, node)
+		if ferr != nil {
+			rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.Failed, Err: ferr})
+			setStepView(rc, node.ID, expr.StepView{Status: string(events.Failed), Outputs: map[string]any{}})
+			return events.Failed
+		}
+		if len(list) == 0 {
+			// Empty list = nothing to do; treat as success so downstream
+			// steps aren't blocked. Emit an informational log line so
+			// operators can see the loop ran zero times deliberately.
+			rc.Bus.Publish(events.StepLog{StepID: node.ID, Stream: events.Info, Line: "for-each: empty list, skipping body"})
+			rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.Success})
+			setStepView(rc, node.ID, expr.StepView{Status: string(events.Success), Outputs: map[string]any{}})
+			return events.Success
+		}
+		worst := events.Success
+		childNode := *node
+		childNode.ForEach = "" // prevent infinite recursion
+		for i, v := range list {
+			rc.Bus.Publish(events.StepLog{StepID: node.ID, Stream: events.Info, Line: fmt.Sprintf("for-each[%d/%d] value=%v", i+1, len(list), v)})
+			rc2 := rc
+			rc2.ForEachIter = &expr.EachContext{Value: v, Index: i}
+			rc2.SuppressLifecycle = true
+			status := runStep(ctx, &childNode, rc2)
+			if isFatal(status) && !isFatal(worst) {
+				worst = status
+			}
+		}
+		rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: worst})
+		setStepView(rc, node.ID, expr.StepView{Status: string(worst), Outputs: map[string]any{}})
+		return worst
+	}
+
 	// Snapshot the step map under lock so parallel reads see a consistent
 	// view even while other steps are writing.
 	rc.StepMu.Lock()
@@ -278,7 +355,13 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 		Steps:   stepsSnap,
 		Env:     rc.Env,
 		Secrets: map[string]string{}, // secrets exposed as-is to expressions; renderer masks output
-		Run:     expr.RunMeta{ID: rc.RunID, Workspace: rc.Workspace.StepsDir},
+		Run: expr.RunMeta{
+			ID:        rc.RunID,
+			Workspace: rc.Workspace.StepsDir,
+			Status:    rc.CleanupStatus,    // empty during main graph, set during cleanup
+			Cancelled: rc.CleanupCancelled, // ditto
+		},
+		Each: rc.ForEachIter, // nil outside a for-each iteration
 	}
 	// Give expressions access to secrets by name too.
 	for _, name := range secretNames(rc.Workflow) {
@@ -323,6 +406,10 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 		}
 		resolvedEnv[k] = s
 	}
+	if rc.ForEachIter != nil {
+		resolvedEnv["EACH_INDEX"] = fmt.Sprintf("%d", rc.ForEachIter.Index)
+		resolvedEnv["EACH_VALUE"] = fmt.Sprintf("%v", rc.ForEachIter.Value)
+	}
 
 	act := actions.Get(node.Action)
 	if act == nil {
@@ -359,32 +446,93 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 		RunID:         rc.RunID,
 	}
 
-	rc.Bus.Publish(events.StepStarted{StepID: node.ID, Name: node.Name, Action: node.Action})
-	start := time.Now()
+	if !rc.SuppressLifecycle {
+		rc.Bus.Publish(events.StepStarted{StepID: node.ID, Name: node.Name, Action: node.Action})
+	}
+	stepCtx, stepSpan := tracing.Start(ctx, "workflow.step",
+		attribute.String("weftly.step_id", node.ID),
+		attribute.String("weftly.action", node.Action),
+	)
+	ctx = stepCtx
+	defer stepSpan.End()
 
-	stepCtx := ctx
-	var cancel context.CancelFunc
-	if node.Timeout > 0 {
-		stepCtx, cancel = context.WithTimeout(ctx, node.Timeout)
-		defer cancel()
+	// runOnce wraps a single attempt so the retry loop can call it
+	// without duplicating the timeout / stepCtx plumbing. Returns the
+	// action outputs on success, or (nil, cause, err) on failure — the
+	// caller decides whether to loop or surface a StepFinished. Per-
+	// attempt duration isn't returned because StepFinished carries the
+	// wall-clock total (see `time.Since(start)` below).
+	runOnce := func() (actions.Outputs, events.Status, error) {
+		stepCtx := ctx
+		var cancel context.CancelFunc
+		if node.Timeout > 0 {
+			stepCtx, cancel = context.WithTimeout(ctx, node.Timeout)
+			defer cancel()
+		}
+		outs, err := act.Run(stepCtx, sc)
+		if err != nil {
+			if stepCtx.Err() == context.DeadlineExceeded {
+				return nil, events.TimedOut, err
+			}
+			return nil, events.Failed, err
+		}
+		return outs, events.Success, nil
 	}
 
-	outs, err := act.Run(stepCtx, sc)
+	start := time.Now()
+	outs, cause, err := runOnce()
+
+	// Retry loop. Attempts is 1-indexed against total; attempt==1 was
+	// the initial call above. Only loop while the observed cause is in
+	// the retryable set.
+	if err != nil && node.Retry != nil && retryHandles(node.Retry, cause) {
+		total := node.Retry.Attempts
+		for attempt := 1; attempt < total; attempt++ {
+			delay := retryDelay(node.Retry, attempt)
+			rc.Bus.Publish(events.StepRetry{
+				StepID:  node.ID,
+				Attempt: attempt,
+				Of:      total,
+				Delay:   delay,
+				Cause:   cause,
+				Err:     err,
+			})
+			select {
+			case <-ctx.Done():
+				// Run was cancelled while we were sleeping between
+				// attempts. Fall through to the normal failure path.
+				err = ctx.Err()
+				goto finishAttempts
+			case <-time.After(delay):
+			}
+			outs, cause, err = runOnce()
+			if err == nil {
+				break
+			}
+			if !retryHandles(node.Retry, cause) {
+				break
+			}
+		}
+	}
+finishAttempts:
 	dur := time.Since(start)
 
 	if err != nil {
-		if stepCtx.Err() == context.DeadlineExceeded {
-			rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.TimedOut, Duration: dur, Err: err})
-			setStepView(rc, node.ID, expr.StepView{Status: string(events.TimedOut), Outputs: map[string]any{}})
+		if cause == events.TimedOut {
+			emitFinished(rc, node.ID,
+				events.StepFinished{StepID: node.ID, Status: events.TimedOut, Duration: dur, Err: err},
+				expr.StepView{Status: string(events.TimedOut), Outputs: map[string]any{}})
 			return events.TimedOut
 		}
 		if node.ContinueOnError {
-			rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.FailedContinued, Duration: dur, Err: err})
-			setStepView(rc, node.ID, expr.StepView{Status: string(events.FailedContinued), Outputs: map[string]any{}})
+			emitFinished(rc, node.ID,
+				events.StepFinished{StepID: node.ID, Status: events.FailedContinued, Duration: dur, Err: err},
+				expr.StepView{Status: string(events.FailedContinued), Outputs: map[string]any{}})
 			return events.FailedContinued
 		}
-		rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.Failed, Duration: dur, Err: err})
-		setStepView(rc, node.ID, expr.StepView{Status: string(events.Failed), Outputs: map[string]any{}})
+		emitFinished(rc, node.ID,
+			events.StepFinished{StepID: node.ID, Status: events.Failed, Duration: dur, Err: err},
+			expr.StepView{Status: string(events.Failed), Outputs: map[string]any{}})
 		return events.Failed
 	}
 
@@ -409,8 +557,9 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 			rc.Bus.Publish(events.StepOutput{StepID: node.ID, Key: k, Value: v})
 		}
 	}
-	rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.Success, Duration: dur})
-	setStepView(rc, node.ID, expr.StepView{Status: string(events.Success), Outputs: outs})
+	emitFinished(rc, node.ID,
+		events.StepFinished{StepID: node.ID, Status: events.Success, Duration: dur},
+		expr.StepView{Status: string(events.Success), Outputs: outs})
 	return events.Success
 }
 
@@ -478,3 +627,156 @@ func checkRequires(tools []string) error {
 
 // ensure imports we might not use in this file don't fail vet
 var _ = os.Environ
+
+// runCleanup executes each cleanup step in schema order. The step's
+// `if:` expression is evaluated against the final run status via the
+// updated expr.Env.Run.Status, so `if: ${{ failure() || cancelled() }}`
+// behaves as documented. Cleanup steps ignore the retry: block (loops
+// on top of a "we're already tearing down" pass are more surprising
+// than useful) but honour timeout: and continue-on-error.
+//
+// A cleanup step's failure never changes the run's aggregate status —
+// the main graph already decided the run's outcome. Failures still
+// emit StepFinished{Failed} so state.json + report.html show them.
+func runCleanup(parentCtx context.Context, steps []schema.Step, rc runCtx, finalStatus events.Status) {
+	// Detached context so a run that was cancelled mid-graph still runs
+	// its cleanup — that's precisely the "please tear this down" case.
+	// A separate 60 s cap ensures a wedged cleanup can't hang the process.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	statusStr := string(finalStatus)
+	cancelled := parentCtx.Err() != nil
+	for i := range steps {
+		s := &steps[i]
+		// Cleanup steps are compiled ad-hoc so the loop can propagate
+		// the run's aggregate status into every expression evaluation.
+		node := &ir.StepNode{
+			ID:              nonEmpty(s.ID, fmt.Sprintf("cleanup_%d", i+1)),
+			Name:            s.Name,
+			Action:          s.ActionType,
+			Config:          s,
+			If:              s.If,
+			Env:             s.Env,
+			ContinueOnError: s.ContinueOnError,
+			Timeout:         s.Timeout,
+			Shell:           s.Shell,
+			Container:       s.Container,
+			OutputsMap:      s.Outputs,
+		}
+		// Snapshot the shared env into a per-call view with the run's
+		// aggregate status set. runStep re-derives envForExpr from
+		// rc, so we mutate rc's fields transiently via a wrapper.
+		rc2 := rc
+		rc2.CleanupStatus = statusStr
+		rc2.CleanupCancelled = cancelled
+		_ = runStep(ctx, node, rc2)
+	}
+}
+
+// evaluateForEach compiles + evaluates the step's for-each expression
+// and coerces the result to a []any. Accepts a real slice, a JSON
+// array, or a comma-separated string (for cheap host input passing).
+func evaluateForEach(rc runCtx, node *ir.StepNode) ([]any, error) {
+	rc.StepMu.Lock()
+	stepsSnap := make(map[string]expr.StepView, len(rc.Steps))
+	for k, v := range rc.Steps {
+		stepsSnap[k] = v
+	}
+	rc.StepMu.Unlock()
+	env := expr.Env{
+		Inputs:  rc.Inputs,
+		Steps:   stepsSnap,
+		Env:     rc.Env,
+		Secrets: map[string]string{},
+		Run:     expr.RunMeta{ID: rc.RunID, Workspace: rc.Workspace.StepsDir},
+	}
+	body := stripWrap(node.ForEach)
+	v, err := rc.Expr.Evaluate(body, env)
+	if err != nil {
+		return nil, fmt.Errorf("for-each: %w", err)
+	}
+	switch xs := v.(type) {
+	case []any:
+		return xs, nil
+	case []string:
+		out := make([]any, len(xs))
+		for i, s := range xs {
+			out[i] = s
+		}
+		return out, nil
+	case string:
+		if xs == "" {
+			return nil, nil
+		}
+		// comma-separated fallback so `for-each: ${{ inputs.hosts }}`
+		// works with a plain string input.
+		parts := strings.Split(xs, ",")
+		out := make([]any, len(parts))
+		for i, p := range parts {
+			out[i] = strings.TrimSpace(p)
+		}
+		return out, nil
+	case nil:
+		return nil, nil
+	}
+	return nil, fmt.Errorf("for-each: expression must evaluate to a list, got %T", v)
+}
+
+// emitFinished publishes StepFinished and writes the step view unless
+// the runCtx is marked SuppressLifecycle (i.e. we're inside a for-each
+// iteration whose outer wrapper is doing the bookkeeping).
+func emitFinished(rc runCtx, id string, fin events.StepFinished, view expr.StepView) {
+	if rc.SuppressLifecycle {
+		return
+	}
+	rc.Bus.Publish(fin)
+	setStepView(rc, id, view)
+}
+
+func nonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// retryHandles reports whether a Retry policy covers the given
+// terminal cause. Empty `on:` defaults to {failed} — a step that hit
+// its explicit timeout is usually not what a retry loop is meant to
+// paper over.
+func retryHandles(r *schema.Retry, cause events.Status) bool {
+	if r == nil {
+		return false
+	}
+	set := r.On
+	if len(set) == 0 {
+		set = []string{"failed"}
+	}
+	for _, s := range set {
+		if s == string(cause) {
+			return true
+		}
+	}
+	return false
+}
+
+// retryDelay computes the wait before attempt N+1 (attempt is 1-indexed
+// against the loop counter used in executeStep). Backoff "" is
+// constant, "linear" scales by attempt count, "exponential" doubles.
+// A zero Delay stays zero — no accidental sleep from "linear * 0".
+func retryDelay(r *schema.Retry, attempt int) time.Duration {
+	if r == nil || r.Delay <= 0 {
+		return 0
+	}
+	switch r.Backoff {
+	case "linear":
+		return r.Delay * time.Duration(attempt)
+	case "exponential":
+		return r.Delay << (attempt - 1)
+	default:
+		return r.Delay
+	}
+}

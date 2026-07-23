@@ -64,6 +64,23 @@ func (s *Server) handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, entry)
 }
 
+// handleAudit returns the in-memory tail of the audit log, newest
+// first. Admin-only when RBAC is enabled — audit data leaks who ran
+// what and shouldn't be visible to non-admin principals.
+func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
+	if !PrincipalFromContext(r.Context()).Admin {
+		writeError(w, http.StatusForbidden, "admin only")
+		return
+	}
+	entries := s.audit.Tail()
+	// Reverse so the newest is first — that's what an operator
+	// scanning the panel actually wants.
+	for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
+		entries[i], entries[j] = entries[j], entries[i]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": entries})
+}
+
 // handleReload re-scans the catalogue directory and swaps the in-memory
 // catalogue on success. Same handler as SIGHUP on unix (see server.go).
 // Admin-only when RBAC is enabled.

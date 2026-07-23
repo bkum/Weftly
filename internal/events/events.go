@@ -69,6 +69,21 @@ type StepFinished struct {
 	Resumed bool
 }
 
+// StepRetry announces that a step failed but will be retried under
+// the step's `retry:` policy. Renderers surface it as an inline
+// "retrying (attempt N/M in Δ)" line so operators see the loop
+// happening rather than a mysteriously long-running step. It does NOT
+// mark a step as finished — a StepFinished still lands after the last
+// attempt (successful or fatal).
+type StepRetry struct {
+	StepID  string
+	Attempt int // 1-indexed count of the attempt that just failed
+	Of      int // total attempts allowed
+	Delay   time.Duration
+	Cause   Status // what failed the attempt (Failed or TimedOut)
+	Err     error
+}
+
 type SummaryEmitted struct {
 	StepID   string
 	Markdown string
@@ -90,6 +105,7 @@ func (StepStarted) isEvent()      {}
 func (StepLog) isEvent()          {}
 func (StepOutput) isEvent()       {}
 func (StepFinished) isEvent()     {}
+func (StepRetry) isEvent()        {}
 func (SummaryEmitted) isEvent()   {}
 func (ArtifactUploaded) isEvent() {}
 func (RunFinished) isEvent()      {}

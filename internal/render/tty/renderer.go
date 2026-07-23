@@ -26,11 +26,21 @@ type Renderer struct {
 	currentStep string
 	stepStart   time.Time
 	summaries   []string
+	ci          bool // emit ::group:: / ::endgroup:: around each step
 }
 
 // New returns a Renderer bound to w.
 func New(w io.Writer, color bool, sec *secrets.Registry) *Renderer {
 	return &Renderer{Out: w, Color: color, Secrets: sec, active: map[string]bool{}}
+}
+
+// NewCI returns a Renderer configured for CI logs: color off, GitHub
+// Actions style `::group::` / `::endgroup::` markers wrap each step
+// so the CI viewer can collapse successful steps and jump straight to
+// the failure. Compatible with GitHub Actions and GitLab CI (which
+// silently ignore unknown markers).
+func NewCI(w io.Writer, sec *secrets.Registry) *Renderer {
+	return &Renderer{Out: w, Color: false, Secrets: sec, active: map[string]bool{}, ci: true}
 }
 
 // Handle is the subscriber function passed to events.Bus.Subscribe.
@@ -46,7 +56,11 @@ func (r *Renderer) Handle(e events.Event) {
 		if name == "" {
 			name = ev.StepID
 		}
-		r.printf("\n%s %s  %s\n", r.color("▶", cyan), name, r.color("["+ev.Action+"]", dim))
+		if r.ci {
+			r.printf("::group::%s (%s)\n", name, ev.Action)
+		} else {
+			r.printf("\n%s %s  %s\n", r.color("▶", cyan), name, r.color("["+ev.Action+"]", dim))
+		}
 	case events.StepLog:
 		line := ev.Line
 		if r.Secrets != nil {
@@ -74,6 +88,16 @@ func (r *Renderer) Handle(e events.Event) {
 		}
 		if ev.Err != nil {
 			msg += "  " + r.color(ev.Err.Error(), red)
+		}
+		r.printf("%s\n", msg)
+		if r.ci {
+			r.printf("::endgroup::\n")
+		}
+	case events.StepRetry:
+		msg := fmt.Sprintf("  %s %s retrying (attempt %d/%d in %s) — %s",
+			r.color("↻", yellow), ev.StepID, ev.Attempt+1, ev.Of, ev.Delay.Round(time.Millisecond), ev.Cause)
+		if ev.Err != nil {
+			msg += ": " + r.color(ev.Err.Error(), dim)
 		}
 		r.printf("%s\n", msg)
 	case events.SummaryEmitted:

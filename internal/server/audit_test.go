@@ -1,0 +1,103 @@
+package server_test
+
+import (
+	"encoding/json"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/bkum/weftly/internal/server"
+)
+
+func TestAuditRecordsPOSTRuns(t *testing.T) {
+	dir, wfID := writeCatalogue(t)
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	ts := startServer(t, server.Config{
+		CatalogueDir: dir,
+		RunsDir:      t.TempDir(),
+		Token:        "tk",
+		AuditFile:    auditPath,
+	})
+	body, _ := json.Marshal(map[string]any{"workflow": wfID})
+	req, _ := http.NewRequest("POST", ts.URL+"/runs", strings.NewReader(string(body)))
+	req.Header.Set("Authorization", "Bearer tk")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /runs: %d", resp.StatusCode)
+	}
+	// GET /audit — bearer-token principal is admin, should be allowed.
+	req, _ = http.NewRequest("GET", ts.URL+"/audit", nil)
+	req.Header.Set("Authorization", "Bearer tk")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("GET /audit: %d", resp.StatusCode)
+	}
+	var body2 struct {
+		Entries []struct {
+			Method   string `json:"method"`
+			Path     string `json:"path"`
+			Workflow string `json:"workflow"`
+			Status   int    `json:"status"`
+		}
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body2); err != nil {
+		t.Fatal(err)
+	}
+	if len(body2.Entries) < 1 {
+		t.Fatalf("want at least 1 audit entry, got %+v", body2)
+	}
+	got := body2.Entries[0]
+	if got.Method != "POST" || got.Path != "/runs" || got.Workflow != wfID || got.Status != http.StatusAccepted {
+		t.Errorf("entry mismatch: %+v", got)
+	}
+	// The on-disk file should have grown by at least one line.
+	data, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"workflow":"`+wfID+`"`) {
+		t.Errorf("audit file missing workflow entry:\n%s", data)
+	}
+}
+
+func TestAuditSkipsGETRequests(t *testing.T) {
+	dir, _ := writeCatalogue(t)
+	ts := startServer(t, server.Config{
+		CatalogueDir: dir,
+		RunsDir:      t.TempDir(),
+		Token:        "tk",
+	})
+	// A read-only GET should not add an audit entry.
+	req, _ := http.NewRequest("GET", ts.URL+"/workflows", nil)
+	req.Header.Set("Authorization", "Bearer tk")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	req, _ = http.NewRequest("GET", ts.URL+"/audit", nil)
+	req.Header.Set("Authorization", "Bearer tk")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Entries []any `json:"entries"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if len(body.Entries) != 0 {
+		t.Errorf("GET should not be audited, got %d entries", len(body.Entries))
+	}
+}

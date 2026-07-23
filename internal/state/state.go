@@ -16,14 +16,19 @@ import (
 )
 
 type StepState struct {
-	Name       string         `json:"name,omitempty"`
-	Action     string         `json:"action,omitempty"`
-	Status     events.Status  `json:"status"`
-	Duration   time.Duration  `json:"duration_ns,omitempty"`
-	Outputs    map[string]any `json:"outputs,omitempty"`
-	Error      string         `json:"error,omitempty"`
-	StartedAt  *time.Time     `json:"started_at,omitempty"`
-	FinishedAt *time.Time     `json:"finished_at,omitempty"`
+	Name     string         `json:"name,omitempty"`
+	Action   string         `json:"action,omitempty"`
+	Status   events.Status  `json:"status"`
+	Duration time.Duration  `json:"duration_ns,omitempty"`
+	Outputs  map[string]any `json:"outputs,omitempty"`
+	Error    string         `json:"error,omitempty"`
+	// Attempts is the number of times executeStep called the action for
+	// this step under a `retry:` policy. Absent = single attempt (the
+	// common case); 2+ means the retry loop kicked in. Renderers/
+	// reports use this to badge a step "succeeded after N attempts".
+	Attempts   int        `json:"attempts,omitempty"`
+	StartedAt  *time.Time `json:"started_at,omitempty"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
 }
 
 type Run struct {
@@ -82,6 +87,16 @@ func (w *Writer) Handle(e events.Event) {
 		s.Status = events.Running
 		s.StartedAt = &start
 		w.run.StepOrder = appendUnique(w.run.StepOrder, ev.StepID)
+	case events.StepRetry:
+		s := w.stepLocked(ev.StepID)
+		// Attempts on StepRetry is 1-indexed against the attempt that
+		// just failed. The final attempt count lands on StepFinished
+		// via ev.Attempt+1 when the retry succeeds, but if the step
+		// fails all attempts we still want the full count — set it to
+		// ev.Attempt here and Finished bumps only on success.
+		if ev.Attempt+1 > s.Attempts {
+			s.Attempts = ev.Attempt + 1
+		}
 	case events.StepOutput:
 		s := w.stepLocked(ev.StepID)
 		if s.Outputs == nil {

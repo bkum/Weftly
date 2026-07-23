@@ -128,6 +128,49 @@ steps:
 `,
 		},
 		{
+			name: "retry with attempts:1 is rejected",
+			src: `
+name: t
+steps:
+  - id: x
+    retry: { attempts: 1, delay: 1s }
+    run: echo hi
+`,
+			wantErr: "attempts must be >= 2",
+		},
+		{
+			name: "retry on: bogus is rejected",
+			src: `
+name: t
+steps:
+  - id: x
+    retry: { attempts: 3, on: [banana] }
+    run: echo hi
+`,
+			wantErr: `unknown status "banana"`,
+		},
+		{
+			name: "retry backoff must be linear/exponential",
+			src: `
+name: t
+steps:
+  - id: x
+    retry: { attempts: 3, backoff: cubic }
+    run: echo hi
+`,
+			wantErr: "backoff must be one of",
+		},
+		{
+			name: "retry valid",
+			src: `
+name: t
+steps:
+  - id: x
+    retry: { attempts: 3, delay: 500ms, backoff: exponential, on: [failed, timed-out] }
+    run: echo hi
+`,
+		},
+		{
 			name: "container on http is rejected",
 			src: `
 name: t

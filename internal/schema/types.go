@@ -51,6 +51,17 @@ type Workflow struct {
 	Env         map[string]string `yaml:"env"`
 	Defaults    Defaults          `yaml:"defaults"`
 	Steps       []Step            `yaml:"steps"`
+	// Include lists other workflow YAML files (paths relative to the
+	// including file) whose steps + env + defaults.shell get merged
+	// into this workflow at Load time. Cycles are detected. Included
+	// name / inputs / description / requires are ignored — includes are
+	// step libraries, not full workflows.
+	Include []string `yaml:"include"`
+	// Cleanup runs sequentially after the main graph completes,
+	// regardless of the run's outcome. Cleanup steps get success() /
+	// failure() / cancelled() populated from the run's aggregate
+	// status so `if:` gates work.
+	Cleanup []Step `yaml:"cleanup"`
 
 	// Source retains the parsed YAML root node for line-number-aware error
 	// reporting. Nil after a bare struct construction (e.g. tests).
@@ -58,7 +69,21 @@ type Workflow struct {
 }
 
 // The set of action keys recognised on a step. Exactly one must be present.
-var actionKeys = []string{"run", "http", "template", "prompt", "assert", "summary", "upload"}
+var actionKeys = []string{"run", "http", "template", "prompt", "assert", "summary", "upload", "wait", "parse", "notify"}
+
+// Retry declares an automatic-retry policy for a step. Attempts is the
+// total number of tries (including the first), so `attempts: 3` means
+// "try up to 3 times". Delay is the base wait between attempts;
+// Backoff=exponential doubles it each round. On restricts which
+// terminal statuses trigger a retry — omitted defaults to failed only,
+// which matches the intuition that a timeout budget was already the
+// operator's choice for "this step is too slow".
+type Retry struct {
+	Attempts int           `yaml:"attempts"`
+	Delay    time.Duration `yaml:"delay"`
+	Backoff  string        `yaml:"backoff"` // "" (constant) | "linear" | "exponential"
+	On       []string      `yaml:"on"`      // subset of {"failed", "timed-out"}
+}
 
 // Step is one node in a workflow. Exactly one of the action-shaped fields is
 // populated after unmarshal; the raw yaml.Node for that action is exposed as
@@ -73,6 +98,8 @@ type Step struct {
 	Timeout         time.Duration     `yaml:"timeout"`
 	Shell           string            `yaml:"shell"`     // per-step override for run action
 	Container       string            `yaml:"container"` // image ref; only valid with run action
+	Retry           *Retry            `yaml:"retry"`     // opt-in retry policy on failure/timeout
+	ForEach         string            `yaml:"for-each"`  // expression → list; runs step N times
 	Outputs         map[string]string `yaml:"outputs"`
 
 	// Populated by custom unmarshal. ActionType is one of actionKeys.
