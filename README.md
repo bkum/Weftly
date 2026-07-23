@@ -151,11 +151,21 @@ weftly run <workflow.yml> [flags]      Execute a workflow (default verb)
 
 weftly validate <workflow.yml>         Static validation, no execution
 weftly list                            Discover workflows in ./workflows
+weftly import-gha <path-or-->          Convert a GitHub Actions workflow to
+                                       weftly YAML (skips uses:, matrix:, etc.
+                                       with a note per dropped construct)
+  --job <id>             pick a specific job when the file has multiple
+  -o, --out <path>       write the converted YAML instead of stdout
 weftly server                          Start the REST + SSE + UI server
   --addr :8080           listen address
   --dir  ./workflows     catalogue directory (only these workflows run)
   --runs-dir ./.weftly   parent directory for per-run state
-  --token ...            bearer token (or $WEFTLY_TOKEN)
+  --token ...            single bearer token (or $WEFTLY_TOKEN)
+  --auth-file <path>     multi-token RBAC file (supersedes --token)
+  --schedules <path>     schedules.yaml — enables cron-driven runs
+  --s3-endpoint / --s3-bucket / --s3-prefix / --s3-region
+  --s3-access-key / --s3-secret-key      mirror artifacts to S3-compatible store
+  --s3-plaintext                          talk http to the S3 endpoint (dev-only)
 weftly version
 ```
 
@@ -195,10 +205,120 @@ Endpoints:
 | `GET /workflows` | Catalogue list |
 | `GET /workflows/{id}` | Full metadata + inputs schema |
 | `POST /runs` | Start a run (`{workflow, inputs}` body) |
+| `GET /runs` | List every persisted run (optional `?workflow=<id>`) |
 | `GET /runs/{id}` | Serve the run's `state.json` |
+| `DELETE /runs/{id}` | Cancel an in-flight run (idempotent) |
 | `GET /runs/{id}/events` | SSE event stream (replay + live) |
-| `GET /runs/{id}/artifacts/{name}` | Download a collected artifact |
-| `POST /reload` | Re-scan the catalogue (SIGHUP does the same) |
+| `GET /runs/{id}/artifacts/{name}` | Download a collected artifact (local first, S3 fallback) |
+| `GET /schedules` / `GET /schedules/{id}` | List / detail configured schedules |
+| `POST /schedules/{id}/trigger` | Fire a schedule immediately |
+| `POST /reload` | Re-scan the catalogue + schedules (SIGHUP does the same) |
+
+## Phase 3 features
+
+### RBAC — multi-token principals + workflow ACLs
+
+Point `weftly server --auth-file weftly.yaml` at a file like this:
+
+```yaml
+tokens:
+  "opaque-token-alice-32-plus-chars":
+    name: alice
+    roles: [ops, admin]
+  "opaque-token-bob-32-plus-chars":
+    name: bob
+    roles: [dev]
+roles:
+  admin:
+    admin: true          # unlocks POST /reload
+    workflows: "*"
+  ops:
+    workflows: "*"
+  dev:
+    workflows: [petclinic-onboarding, dev-smoke]
+```
+
+Callers see only workflows and runs their allowlist permits — the
+catalogue endpoint, the runs listing, cancel, and schedule endpoints
+all filter identically. Token compare is constant-time; token entries
+under 12 chars are rejected at load time.
+
+### Scheduled runs — `--schedules schedules.yaml`
+
+Cron-driven dispatch of catalogue workflows. Bad crons on one entry
+surface as `parse_error` on that entry, not a whole-file reject.
+
+```yaml
+schedules:
+  - id: nightly-onboarding
+    workflow: petclinic-onboarding
+    cron: "0 2 * * *"        # 5-field cron, or one of @hourly/@daily/@weekly/@monthly/@yearly
+    tz: America/Los_Angeles
+    inputs:
+      env_url: https://petclinic.example.com
+      api_key: ${WEFTLY_PETCLINIC_KEY}
+  - id: on-demand
+    workflow: dev-smoke
+    cron: "@yearly"          # effectively manual — trigger via POST /schedules/on-demand/trigger
+    disabled: false
+```
+
+Reload with `POST /reload` or `SIGHUP`. The SPA has a Schedules page
+with a Trigger-now button per row.
+
+### Container executor — `container:` on a step
+
+Runs the shell inside `podman run` / `docker run` (podman preferred,
+docker fallback). Workspace + script + `$WEFTLY_OUTPUT` bind-mounted;
+env vars validated as POSIX identifiers before `-e`; `--network=none`
+by default.
+
+```yaml
+steps:
+  - id: audit
+    container: alpine:3.19
+    run: |
+      apk add --no-cache jq >/dev/null
+      echo "vuln_count=$(jq '.data | length' report.json)" >> "$WEFTLY_OUTPUT"
+```
+
+Neither engine on `$PATH` → the run errors immediately rather than
+silently falling back to host exec.
+
+### Remote artifact store — S3-compatible
+
+Every `upload` action mirrors to the bucket in addition to writing
+locally. `GET /runs/{id}/artifacts/{name}` transparently falls back to
+the bucket when the local file is missing (retention pruned, node
+replaced, ...).
+
+```
+weftly server \
+  --dir ./workflows \
+  --s3-endpoint s3.amazonaws.com \
+  --s3-bucket weftly-artifacts \
+  --s3-prefix prod/         # namespaces runs inside a shared bucket
+```
+
+Access + secret keys can come from `--s3-access-key / --s3-secret-key`
+or `$WEFTLY_S3_ACCESS_KEY / $WEFTLY_S3_SECRET_KEY`.
+
+### GitHub Actions ingestion — `weftly import-gha`
+
+Compile-time seam: converts the supported subset of a GHA workflow to
+weftly YAML. Not called at runtime — you review the converted file
+and any translation notes, then drop it into a catalogue.
+
+```
+weftly import-gha .github/workflows/deploy.yml --job deploy > workflows/deploy.yml
+```
+
+Steps with `uses:` are skipped with a note (weftly doesn't run
+marketplace actions). GHA-only expression helpers
+(`success()`, `hashFiles()`, `fromJSON()`, ...) are copied verbatim
+into `if:` and flagged. The emitted YAML is re-validated against
+`schema.Validate` before being written, so translator bugs surface at
+import time.
 
 ## Testing
 
