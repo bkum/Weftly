@@ -31,6 +31,7 @@ import (
 type Options struct {
 	BaseDir string // parent of runs/ (default ./.weftly)
 	Strict  bool   // pass through to actions
+	AutoYes bool   // --yes: prompt(type:confirm) auto-answers true
 	Inputs  map[string]any
 	Vars    map[string]string // --var overrides of workflow env
 	Bus     *events.Bus
@@ -125,6 +126,7 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 			Expr:         ev,
 			DefaultShell: defaultShell,
 			Strict:       opts.Strict,
+			AutoYes:      opts.AutoYes,
 			RunID:        runID,
 		})
 		if status == events.Failed || status == events.TimedOut {
@@ -162,6 +164,7 @@ type runCtx struct {
 	Expr         *expr.Evaluator
 	DefaultShell string
 	Strict       bool
+	AutoYes      bool
 	RunID        string
 }
 
@@ -246,6 +249,7 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 		Shell:        shell,
 		Timeout:      node.Timeout,
 		Strict:       rc.Strict,
+		AutoYes:      rc.AutoYes,
 		HTTPTimeout:  rc.Workflow.Defaults.HTTP.Timeout,
 		HTTPHeaders:  rc.Workflow.Defaults.HTTP.Headers,
 	}

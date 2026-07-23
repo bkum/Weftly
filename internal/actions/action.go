@@ -52,6 +52,7 @@ type StepContext struct {
 	Shell   string        // default shell (overridden per-step if set)
 	Timeout time.Duration // per-step timeout; 0 = none
 	Strict  bool          // --strict: inline ${{ }} in run: bodies is an error
+	AutoYes bool          // --yes: prompt(type:confirm) auto-answers true
 
 	// HTTPDefaults are workflow-level http defaults merged into every http
 	// action call. Populated by the engine from schema.Defaults.HTTP.

@@ -25,6 +25,7 @@ func newRunCmd() *cobra.Command {
 		jsonOutput bool
 		noColor    bool
 		strict     bool
+		autoYes    bool
 	)
 	cmd := &cobra.Command{
 		Use:   "run <workflow.yml>",
@@ -97,10 +98,11 @@ func newRunCmd() *cobra.Command {
 			}
 
 			res, err := engine.Run(context.Background(), wf, engine.Options{
-				Strict: strict,
-				Inputs: supplied,
-				Vars:   varOverrides,
-				Bus:    bus,
+				Strict:  strict,
+				AutoYes: autoYes,
+				Inputs:  supplied,
+				Vars:    varOverrides,
+				Bus:     bus,
 			})
 			if err != nil {
 				return err
@@ -121,6 +123,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit the event stream as JSON")
 	cmd.Flags().BoolVar(&noColor, "no-color", false, "plain output")
 	cmd.Flags().BoolVar(&strict, "strict", false, "treat inline expr-in-run as an error")
+	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-answer 'yes' to every prompt(type:confirm) step")
 	return cmd
 }
 
