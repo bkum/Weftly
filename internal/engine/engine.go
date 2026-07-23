@@ -44,6 +44,14 @@ type Options struct {
 	// mirrors each artifact to it in addition to the local artifacts
 	// dir. Server mode wires this to an S3 / MinIO store from config.
 	ArtifactStore actions.RemoteArtifactStore
+
+	// PostSubscribers are event-bus subscribers registered AFTER
+	// engine's own state.Writer + report. They observe events strictly
+	// after those two have processed them, so a caller (typically the
+	// server's per-run record) can hand off from live-SSE to disk
+	// (state.json / report.html / artifacts) without racing the
+	// filesystem. Empty in CLI mode.
+	PostSubscribers []func(events.Event)
 }
 
 // Result summarises a completed run.
@@ -125,6 +133,13 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 	rep := report.New(sec)
 	bus.Subscribe(sw.Handle)
 	bus.Subscribe(rep.Handle)
+	// Late subscribers see events strictly after state.Writer + report
+	// have processed them — required for the server's runRecord so an
+	// SSE client that pivots to GET /runs/:id can't observe stale
+	// state.json.
+	for _, sub := range opts.PostSubscribers {
+		bus.Subscribe(sub)
+	}
 
 	// Preflight: check `requires:` tools are on PATH.
 	if err := checkRequires(wf.Requires); err != nil {

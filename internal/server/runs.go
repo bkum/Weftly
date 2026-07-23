@@ -124,9 +124,10 @@ func newRunManager(baseDir string, log *slog.Logger, store actions.RemoteArtifac
 func (m *runManager) start(_ context.Context, wfID string, wf *schema.Workflow, inputs map[string]any) (*runRecord, error) {
 	rec := newRunRecord("", wfID, inputs)
 	bus := events.NewBus()
-	bus.Subscribe(rec.handle)
 
-	// Peek the run-id from RunStarted by inserting a one-shot subscriber.
+	// Peek the run-id from RunStarted by inserting a one-shot subscriber
+	// AT THE FRONT of the fan-out. It doesn't observe payload state, so
+	// ordering vs the other subscribers is irrelevant.
 	idCh := make(chan string, 1)
 	var once sync.Once
 	bus.Subscribe(func(e events.Event) {
@@ -137,15 +138,22 @@ func (m *runManager) start(_ context.Context, wfID string, wf *schema.Workflow, 
 
 	errCh := make(chan error, 1)
 	go func() {
+		// rec.handle is passed as PostSubscribers so it fires AFTER
+		// engine's own state.Writer + report subscribers. That
+		// guarantees a client receiving RunFinished from the SSE
+		// stream sees state.json/report.html already flushed to disk
+		// when it pivots to GET /runs/:id.
 		_, err := engine.Run(context.Background(), wf, engine.Options{
-			BaseDir:       m.baseDir,
-			Inputs:        inputs,
-			Bus:           bus,
-			ArtifactStore: m.store,
+			BaseDir:         m.baseDir,
+			Inputs:          inputs,
+			Bus:             bus,
+			ArtifactStore:   m.store,
+			PostSubscribers: []func(events.Event){rec.handle},
 		})
 		errCh <- err
-		// Only NOW is it safe to close SSE waiters: engine.Run has
-		// returned, so state.Writer + report have flushed disk.
+		// Belt and braces: even with post-subscriber ordering, close the
+		// waiter channels once engine.Run returns so blocked SSE readers
+		// unblock even if the last event was somehow lost.
 		rec.markClosed()
 	}()
 
