@@ -45,6 +45,7 @@ func Compile(wf *schema.Workflow) *ir.Graph {
 			Shell:           s.Shell,
 			Container:       s.Container,
 			Retry:           s.Retry,
+			ForEach:         s.ForEach,
 			OutputsMap:      s.Outputs,
 		})
 		if s.ID != "" {

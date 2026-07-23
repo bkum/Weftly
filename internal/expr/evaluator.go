@@ -50,6 +50,13 @@ type StepView struct {
 	Status  string
 }
 
+// EachContext is populated inside a for-each iteration and exposed as
+// `each.value` + `each.index` in expressions. Nil outside a for-each.
+type EachContext struct {
+	Value any
+	Index int
+}
+
 // Env is the resolvable namespaces at the point of evaluation.
 type Env struct {
 	Inputs   map[string]any
@@ -58,6 +65,7 @@ type Env struct {
 	Secrets  map[string]string
 	Run      RunMeta
 	Response any
+	Each     *EachContext
 }
 
 // Evaluator is safe for concurrent use once constructed.
@@ -236,6 +244,12 @@ func (e *Evaluator) envMap(env Env) map[string]any {
 	}
 	if env.Response != nil {
 		m["response"] = env.Response
+	}
+	if env.Each != nil {
+		m["each"] = map[string]any{
+			"value": env.Each.Value,
+			"index": env.Each.Index,
+		}
 	}
 	// Register function names so expr can compile references to them even
 	// when the map itself is used as the environment.

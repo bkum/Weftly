@@ -81,6 +81,14 @@ func ParseKVString(pairs []string) (map[string]string, error) {
 
 func coerceInput(raw any, t schema.InputType) (any, error) {
 	if t == "" {
+		// Default to string coercion for scalar-shaped values so
+		// existing workflows (which lean on strings) keep working, but
+		// pass structured values (list / map) through unchanged so
+		// for-each can consume a `default: [a, b, c]` directly.
+		switch raw.(type) {
+		case []any, []string, map[string]any:
+			return raw, nil
+		}
 		t = schema.InputString
 	}
 	switch t {

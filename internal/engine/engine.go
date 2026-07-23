@@ -243,6 +243,15 @@ type runCtx struct {
 	// cleanup step. Feeds success()/failure() so cleanup gates work.
 	CleanupStatus    string
 	CleanupCancelled bool
+	// ForEachIter, when non-nil, means we're inside one iteration of a
+	// for-each expansion. runStep injects it into envForExpr as `each`
+	// and skips re-expansion. Nil for regular steps.
+	ForEachIter *expr.EachContext
+	// SuppressLifecycle causes runStep to skip publishing the outer
+	// StepStarted/StepFinished events and skip the setStepView writes.
+	// Used when the outer for-each wrapper is already tracking the
+	// step's lifecycle and each iteration must not double-emit.
+	SuppressLifecycle bool
 }
 
 // runStep resolves per-step context, dispatches to the action, and updates
@@ -279,6 +288,48 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 		}
 	}
 
+	// For-each expansion. When ForEach is set and we're at the outer
+	// invocation (rc.ForEachIter == nil), evaluate the expression to a
+	// list, emit one wrapping StepStarted, then recurse per element
+	// with rc.ForEachIter populated. Aggregate outcome is the worst
+	// element status (Failed > TimedOut > Success). Iterations run
+	// sequentially; parallelism would need per-iteration StepView keys
+	// and is deferred.
+	if node.ForEach != "" && rc.ForEachIter == nil {
+		rc.Bus.Publish(events.StepStarted{StepID: node.ID, Name: node.Name, Action: node.Action})
+		list, ferr := evaluateForEach(rc, node)
+		if ferr != nil {
+			rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.Failed, Err: ferr})
+			setStepView(rc, node.ID, expr.StepView{Status: string(events.Failed), Outputs: map[string]any{}})
+			return events.Failed
+		}
+		if len(list) == 0 {
+			// Empty list = nothing to do; treat as success so downstream
+			// steps aren't blocked. Emit an informational log line so
+			// operators can see the loop ran zero times deliberately.
+			rc.Bus.Publish(events.StepLog{StepID: node.ID, Stream: events.Info, Line: "for-each: empty list, skipping body"})
+			rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.Success})
+			setStepView(rc, node.ID, expr.StepView{Status: string(events.Success), Outputs: map[string]any{}})
+			return events.Success
+		}
+		worst := events.Success
+		childNode := *node
+		childNode.ForEach = "" // prevent infinite recursion
+		for i, v := range list {
+			rc.Bus.Publish(events.StepLog{StepID: node.ID, Stream: events.Info, Line: fmt.Sprintf("for-each[%d/%d] value=%v", i+1, len(list), v)})
+			rc2 := rc
+			rc2.ForEachIter = &expr.EachContext{Value: v, Index: i}
+			rc2.SuppressLifecycle = true
+			status := runStep(ctx, &childNode, rc2)
+			if isFatal(status) && !isFatal(worst) {
+				worst = status
+			}
+		}
+		rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: worst})
+		setStepView(rc, node.ID, expr.StepView{Status: string(worst), Outputs: map[string]any{}})
+		return worst
+	}
+
 	// Snapshot the step map under lock so parallel reads see a consistent
 	// view even while other steps are writing.
 	rc.StepMu.Lock()
@@ -299,6 +350,7 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 			Status:    rc.CleanupStatus,    // empty during main graph, set during cleanup
 			Cancelled: rc.CleanupCancelled, // ditto
 		},
+		Each: rc.ForEachIter, // nil outside a for-each iteration
 	}
 	// Give expressions access to secrets by name too.
 	for _, name := range secretNames(rc.Workflow) {
@@ -343,6 +395,10 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 		}
 		resolvedEnv[k] = s
 	}
+	if rc.ForEachIter != nil {
+		resolvedEnv["EACH_INDEX"] = fmt.Sprintf("%d", rc.ForEachIter.Index)
+		resolvedEnv["EACH_VALUE"] = fmt.Sprintf("%v", rc.ForEachIter.Value)
+	}
 
 	act := actions.Get(node.Action)
 	if act == nil {
@@ -379,7 +435,9 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 		RunID:         rc.RunID,
 	}
 
-	rc.Bus.Publish(events.StepStarted{StepID: node.ID, Name: node.Name, Action: node.Action})
+	if !rc.SuppressLifecycle {
+		rc.Bus.Publish(events.StepStarted{StepID: node.ID, Name: node.Name, Action: node.Action})
+	}
 
 	// runOnce wraps a single attempt so the retry loop can call it
 	// without duplicating the timeout / stepCtx plumbing. Returns the
@@ -444,17 +502,20 @@ finishAttempts:
 
 	if err != nil {
 		if cause == events.TimedOut {
-			rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.TimedOut, Duration: dur, Err: err})
-			setStepView(rc, node.ID, expr.StepView{Status: string(events.TimedOut), Outputs: map[string]any{}})
+			emitFinished(rc, node.ID,
+				events.StepFinished{StepID: node.ID, Status: events.TimedOut, Duration: dur, Err: err},
+				expr.StepView{Status: string(events.TimedOut), Outputs: map[string]any{}})
 			return events.TimedOut
 		}
 		if node.ContinueOnError {
-			rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.FailedContinued, Duration: dur, Err: err})
-			setStepView(rc, node.ID, expr.StepView{Status: string(events.FailedContinued), Outputs: map[string]any{}})
+			emitFinished(rc, node.ID,
+				events.StepFinished{StepID: node.ID, Status: events.FailedContinued, Duration: dur, Err: err},
+				expr.StepView{Status: string(events.FailedContinued), Outputs: map[string]any{}})
 			return events.FailedContinued
 		}
-		rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.Failed, Duration: dur, Err: err})
-		setStepView(rc, node.ID, expr.StepView{Status: string(events.Failed), Outputs: map[string]any{}})
+		emitFinished(rc, node.ID,
+			events.StepFinished{StepID: node.ID, Status: events.Failed, Duration: dur, Err: err},
+			expr.StepView{Status: string(events.Failed), Outputs: map[string]any{}})
 		return events.Failed
 	}
 
@@ -479,8 +540,9 @@ finishAttempts:
 			rc.Bus.Publish(events.StepOutput{StepID: node.ID, Key: k, Value: v})
 		}
 	}
-	rc.Bus.Publish(events.StepFinished{StepID: node.ID, Status: events.Success, Duration: dur})
-	setStepView(rc, node.ID, expr.StepView{Status: string(events.Success), Outputs: outs})
+	emitFinished(rc, node.ID,
+		events.StepFinished{StepID: node.ID, Status: events.Success, Duration: dur},
+		expr.StepView{Status: string(events.Success), Outputs: outs})
 	return events.Success
 }
 
@@ -593,6 +655,66 @@ func runCleanup(parentCtx context.Context, steps []schema.Step, rc runCtx, final
 		rc2.CleanupCancelled = cancelled
 		_ = runStep(ctx, node, rc2)
 	}
+}
+
+// evaluateForEach compiles + evaluates the step's for-each expression
+// and coerces the result to a []any. Accepts a real slice, a JSON
+// array, or a comma-separated string (for cheap host input passing).
+func evaluateForEach(rc runCtx, node *ir.StepNode) ([]any, error) {
+	rc.StepMu.Lock()
+	stepsSnap := make(map[string]expr.StepView, len(rc.Steps))
+	for k, v := range rc.Steps {
+		stepsSnap[k] = v
+	}
+	rc.StepMu.Unlock()
+	env := expr.Env{
+		Inputs:  rc.Inputs,
+		Steps:   stepsSnap,
+		Env:     rc.Env,
+		Secrets: map[string]string{},
+		Run:     expr.RunMeta{ID: rc.RunID, Workspace: rc.Workspace.StepsDir},
+	}
+	body := stripWrap(node.ForEach)
+	v, err := rc.Expr.Evaluate(body, env)
+	if err != nil {
+		return nil, fmt.Errorf("for-each: %w", err)
+	}
+	switch xs := v.(type) {
+	case []any:
+		return xs, nil
+	case []string:
+		out := make([]any, len(xs))
+		for i, s := range xs {
+			out[i] = s
+		}
+		return out, nil
+	case string:
+		if xs == "" {
+			return nil, nil
+		}
+		// comma-separated fallback so `for-each: ${{ inputs.hosts }}`
+		// works with a plain string input.
+		parts := strings.Split(xs, ",")
+		out := make([]any, len(parts))
+		for i, p := range parts {
+			out[i] = strings.TrimSpace(p)
+		}
+		return out, nil
+	case nil:
+		return nil, nil
+	}
+	return nil, fmt.Errorf("for-each: expression must evaluate to a list, got %T", v)
+}
+
+// emitFinished publishes StepFinished and writes the step view unless
+// the runCtx is marked SuppressLifecycle (i.e. we're inside a for-each
+// iteration whose outer wrapper is doing the bookkeeping).
+func emitFinished(rc runCtx, id string, fin events.StepFinished, view expr.StepView) {
+	if rc.SuppressLifecycle {
+		return
+	}
+	rc.Bus.Publish(fin)
+	setStepView(rc, id, view)
 }
 
 func nonEmpty(vals ...string) string {

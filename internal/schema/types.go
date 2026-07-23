@@ -55,7 +55,7 @@ type Workflow struct {
 	// regardless of the run's outcome. Cleanup steps get success() /
 	// failure() / cancelled() populated from the run's aggregate
 	// status so `if:` gates work.
-	Cleanup     []Step            `yaml:"cleanup"`
+	Cleanup []Step `yaml:"cleanup"`
 
 	// Source retains the parsed YAML root node for line-number-aware error
 	// reporting. Nil after a bare struct construction (e.g. tests).
@@ -93,6 +93,7 @@ type Step struct {
 	Shell           string            `yaml:"shell"`     // per-step override for run action
 	Container       string            `yaml:"container"` // image ref; only valid with run action
 	Retry           *Retry            `yaml:"retry"`     // opt-in retry policy on failure/timeout
+	ForEach         string            `yaml:"for-each"`  // expression → list; runs step N times
 	Outputs         map[string]string `yaml:"outputs"`
 
 	// Populated by custom unmarshal. ActionType is one of actionKeys.
