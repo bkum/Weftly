@@ -10,6 +10,7 @@ package actions
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -63,6 +64,25 @@ type StepContext struct {
 	// the engine's post-Run outputs mapping (`outputs: { id: "${{ response.
 	// body.partnerId }}" }`) can see it. Other actions leave it nil.
 	Response any
+
+	// ArtifactStore, when non-nil, is a mirror the upload action pushes
+	// each collected file to in addition to the local artifacts dir.
+	// Used by server-mode deployments that want durable off-host storage
+	// (S3, R2, Spaces). The local copy is kept for report.html
+	// embedding + fast local access. Declared as a minimal interface
+	// here to avoid an import cycle with internal/artifacts.
+	ArtifactStore RemoteArtifactStore
+
+	// RunID is a key prefix for ArtifactStore Put/Get so multiple runs
+	// don't collide inside a shared bucket.
+	RunID string
+}
+
+// RemoteArtifactStore is the subset of internal/artifacts.Store the
+// upload action needs. The concrete store is constructed by the engine
+// or the server based on configuration.
+type RemoteArtifactStore interface {
+	Put(ctx context.Context, key string, r io.Reader, size int64, contentType string) error
 }
 
 // Log is a convenience for emitting a StepLog line. A nil Emit (e.g. in a

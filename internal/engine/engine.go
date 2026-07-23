@@ -39,6 +39,19 @@ type Options struct {
 	Inputs   map[string]any
 	Vars     map[string]string // --var overrides of workflow env
 	Bus      *events.Bus
+
+	// ArtifactStore, when non-nil, is passed to actions so upload
+	// mirrors each artifact to it in addition to the local artifacts
+	// dir. Server mode wires this to an S3 / MinIO store from config.
+	ArtifactStore actions.RemoteArtifactStore
+
+	// PostSubscribers are event-bus subscribers registered AFTER
+	// engine's own state.Writer + report. They observe events strictly
+	// after those two have processed them, so a caller (typically the
+	// server's per-run record) can hand off from live-SSE to disk
+	// (state.json / report.html / artifacts) without racing the
+	// filesystem. Empty in CLI mode.
+	PostSubscribers []func(events.Event)
 }
 
 // Result summarises a completed run.
@@ -120,6 +133,13 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 	rep := report.New(sec)
 	bus.Subscribe(sw.Handle)
 	bus.Subscribe(rep.Handle)
+	// Late subscribers see events strictly after state.Writer + report
+	// have processed them — required for the server's runRecord so an
+	// SSE client that pivots to GET /runs/:id can't observe stale
+	// state.json.
+	for _, sub := range opts.PostSubscribers {
+		bus.Subscribe(sub)
+	}
 
 	// Preflight: check `requires:` tools are on PATH.
 	if err := checkRequires(wf.Requires); err != nil {
@@ -154,20 +174,21 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 	}
 
 	rc := runCtx{
-		Workflow:     wf,
-		Inputs:       inputs,
-		Secrets:      sec,
-		Env:          baseEnv,
-		Steps:        stepViews,
-		StepMu:       &stepMu,
-		ResumeCache:  resumeCache,
-		Workspace:    ws,
-		Bus:          bus,
-		Expr:         ev,
-		DefaultShell: defaultShell,
-		Strict:       opts.Strict,
-		AutoYes:      opts.AutoYes,
-		RunID:        runID,
+		Workflow:      wf,
+		Inputs:        inputs,
+		Secrets:       sec,
+		Env:           baseEnv,
+		Steps:         stepViews,
+		StepMu:        &stepMu,
+		ResumeCache:   resumeCache,
+		Workspace:     ws,
+		ArtifactStore: opts.ArtifactStore,
+		Bus:           bus,
+		Expr:          ev,
+		DefaultShell:  defaultShell,
+		Strict:        opts.Strict,
+		AutoYes:       opts.AutoYes,
+		RunID:         runID,
 	}
 	overallStatus := schedule(ctx, graph, parallel, func(ctx context.Context, node *ir.StepNode) events.Status {
 		return runStep(ctx, node, rc)
@@ -192,20 +213,21 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 }
 
 type runCtx struct {
-	Workflow     *schema.Workflow
-	Inputs       map[string]any
-	Secrets      *secrets.Registry
-	Env          map[string]string
-	Steps        map[string]expr.StepView
-	StepMu       *sync.Mutex // serialises reads/writes to Steps under parallel execution
-	ResumeCache  map[string]*state.StepState
-	Workspace    *workspace.Workspace
-	Bus          *events.Bus
-	Expr         *expr.Evaluator
-	DefaultShell string
-	Strict       bool
-	AutoYes      bool
-	RunID        string
+	Workflow      *schema.Workflow
+	Inputs        map[string]any
+	Secrets       *secrets.Registry
+	Env           map[string]string
+	Steps         map[string]expr.StepView
+	StepMu        *sync.Mutex // serialises reads/writes to Steps under parallel execution
+	ResumeCache   map[string]*state.StepState
+	Workspace     *workspace.Workspace
+	Bus           *events.Bus
+	Expr          *expr.Evaluator
+	DefaultShell  string
+	Strict        bool
+	AutoYes       bool
+	RunID         string
+	ArtifactStore actions.RemoteArtifactStore
 }
 
 // runStep resolves per-step context, dispatches to the action, and updates
@@ -313,25 +335,27 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 	}
 
 	sc := &actions.StepContext{
-		StepID:       node.ID,
-		StepName:     node.Name,
-		Action:       node.Action,
-		Config:       node.Config.ActionNode,
-		Inputs:       rc.Inputs,
-		Steps:        rc.Steps,
-		Env:          resolvedEnv,
-		Secrets:      rc.Secrets,
-		Workdir:      rc.Workspace.StepsDir,
-		ArtifactsDir: rc.Workspace.ArtifactsDir,
-		ExprEnv:      envForExpr,
-		Emit:         rc.Bus.Publish,
-		Expr:         rc.Expr,
-		Shell:        shell,
-		Timeout:      node.Timeout,
-		Strict:       rc.Strict,
-		AutoYes:      rc.AutoYes,
-		HTTPTimeout:  rc.Workflow.Defaults.HTTP.Timeout,
-		HTTPHeaders:  rc.Workflow.Defaults.HTTP.Headers,
+		StepID:        node.ID,
+		StepName:      node.Name,
+		Action:        node.Action,
+		Config:        node.Config.ActionNode,
+		Inputs:        rc.Inputs,
+		Steps:         rc.Steps,
+		Env:           resolvedEnv,
+		Secrets:       rc.Secrets,
+		Workdir:       rc.Workspace.StepsDir,
+		ArtifactsDir:  rc.Workspace.ArtifactsDir,
+		ExprEnv:       envForExpr,
+		Emit:          rc.Bus.Publish,
+		Expr:          rc.Expr,
+		Shell:         shell,
+		Timeout:       node.Timeout,
+		Strict:        rc.Strict,
+		AutoYes:       rc.AutoYes,
+		HTTPTimeout:   rc.Workflow.Defaults.HTTP.Timeout,
+		HTTPHeaders:   rc.Workflow.Defaults.HTTP.Headers,
+		ArtifactStore: rc.ArtifactStore,
+		RunID:         rc.RunID,
 	}
 
 	rc.Bus.Publish(events.StepStarted{StepID: node.ID, Name: node.Name, Action: node.Action})

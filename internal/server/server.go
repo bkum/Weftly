@@ -16,6 +16,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/bkum/weftly/internal/artifacts"
 )
 
 // Config configures a server instance.
@@ -37,6 +39,10 @@ type Config struct {
 	// allowlist mapping (see LoadAuthFile). When set, it supersedes Token
 	// and full RBAC applies.
 	AuthFile string
+	// S3 is optional. When set, the upload action mirrors each artifact
+	// to this bucket and GET /runs/:id/artifacts/:name falls back to it
+	// when the local file is absent (e.g. after local retention pruning).
+	S3 *artifacts.S3Config
 	// MaxBodyBytes caps request bodies to prevent trivial DoS.
 	// Default 1 MiB when zero.
 	MaxBodyBytes int64
@@ -49,12 +55,13 @@ type Config struct {
 
 // Server is a running or startable HTTP server.
 type Server struct {
-	cfg  Config
-	log  *slog.Logger
-	cat  *catalogue
-	runs *runManager
-	srv  *http.Server
-	auth Authenticator
+	cfg   Config
+	log   *slog.Logger
+	cat   *catalogue
+	runs  *runManager
+	srv   *http.Server
+	auth  Authenticator
+	store artifacts.Store // nil unless Config.S3 is set
 }
 
 // New builds a Server. It loads the catalogue eagerly so mis-configuration
@@ -86,12 +93,23 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	var store artifacts.Store
+	if cfg.S3 != nil {
+		s3, err := artifacts.NewS3(*cfg.S3)
+		if err != nil {
+			return nil, err
+		}
+		store = s3
+		cfg.Logger.Info("server: S3 artifact store enabled",
+			"endpoint", cfg.S3.Endpoint, "bucket", cfg.S3.Bucket, "prefix", cfg.S3.KeyPrefix)
+	}
 	return &Server{
-		cfg:  cfg,
-		log:  cfg.Logger,
-		cat:  cat,
-		runs: newRunManager(cfg.RunsDir, cfg.Logger),
-		auth: auth,
+		cfg:   cfg,
+		log:   cfg.Logger,
+		cat:   cat,
+		runs:  newRunManager(cfg.RunsDir, cfg.Logger, store),
+		auth:  auth,
+		store: store,
 	}, nil
 }
 
