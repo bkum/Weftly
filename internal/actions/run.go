@@ -92,14 +92,21 @@ func (r runAction) Run(ctx context.Context, sc *StepContext) (Outputs, error) {
 	cmd.Dir = sc.Workdir
 	cmd.Env = buildEnv(sc, outputPath)
 	setupProcessGroup(cmd)
-	// WaitDelay caps how long Wait will block waiting for stdout/stderr
-	// pipes to close after the process exits. Without it, an orphaned
-	// grandchild (e.g. `sleep 5` inside a killed bash) keeps the pipe FDs
-	// open and our streamLines goroutines block until the grandchild dies
-	// on its own — defeating any per-step timeout. Setting a small delay
-	// lets Wait return promptly; Go closes the pipes forcibly at that
-	// point (available since Go 1.20).
-	cmd.WaitDelay = 500 * time.Millisecond
+	// On context cancel (timeout or user), kill the whole process group,
+	// not just the parent shell. Without this, an orphaned grandchild
+	// like `sleep 5` inside a killed bash keeps the inherited stdio FDs
+	// open and the WaitDelay pipe-close path never actually fires.
+	// Setpgid=true in setupProcessGroup guarantees pgid == pid.
+	if runtime.GOOS != "windows" {
+		cmd.Cancel = func() error {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+	}
+	// WaitDelay is applied AFTER Process.Wait completes and forces the
+	// stdio pipe FDs closed if streamLines is still blocked on them
+	// (e.g. because a grandchild survived the kill briefly). Requires
+	// cmd.Wait to run before wg.Wait — see restructured order below.
+	cmd.WaitDelay = 2 * time.Second
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -113,25 +120,16 @@ func (r runAction) Run(ctx context.Context, sc *StepContext) (Outputs, error) {
 		return nil, err
 	}
 
-	// If context is cancelled (timeout or user cancel), kill the whole
-	// process group so children (curl in a subshell etc.) go with it.
-	killDone := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			killProcessGroup(cmd)
-		case <-killDone:
-		}
-	}()
-
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go streamLines(&wg, stdout, events.Stdout, sc)
 	go streamLines(&wg, stderr, events.Stderr, sc)
-	wg.Wait()
 
+	// Order matters: cmd.Wait first so that when the process exits Go can
+	// enforce WaitDelay against the stdio pipes; then wg.Wait, which now
+	// unblocks because scanner.Scan returns EOF on the force-closed pipe.
 	runErr := cmd.Wait()
-	close(killDone)
+	wg.Wait()
 
 	if ctx.Err() == context.DeadlineExceeded {
 		return nil, fmt.Errorf("run: timed out after %s", sc.Timeout)
@@ -309,22 +307,5 @@ func setupProcessGroup(cmd *exec.Cmd) {
 	}
 }
 
-// killProcessGroup sends SIGKILL to the whole process group so that any
-// grandchild (curl in a subshell, sleep in a script) dies with the shell.
-// SIGTERM would give a shell a chance to trap, but on cancel we've already
-// blown the timeout and want the tree gone immediately.
-func killProcessGroup(cmd *exec.Cmd) {
-	if cmd.Process == nil {
-		return
-	}
-	if runtime.GOOS == "windows" {
-		_ = cmd.Process.Kill()
-		return
-	}
-	pgid, err := syscall.Getpgid(cmd.Process.Pid)
-	if err != nil {
-		_ = cmd.Process.Kill()
-		return
-	}
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
-}
+// Process-group cancel is wired via cmd.Cancel above; this file used to
+// hold a killProcessGroup helper, now inlined at the cancel site.
