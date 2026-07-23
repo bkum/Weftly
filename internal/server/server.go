@@ -30,8 +30,13 @@ type Config struct {
 	RunsDir string
 	// Token is the bearer token required in the `Authorization: Bearer
 	// <token>` header. Empty disables auth (test only — never do this in
-	// production; log emits a warning on startup).
+	// production; log emits a warning on startup). Ignored when AuthFile
+	// is set.
 	Token string
+	// AuthFile points at a weftly.yaml with a multi-token → role → workflow
+	// allowlist mapping (see LoadAuthFile). When set, it supersedes Token
+	// and full RBAC applies.
+	AuthFile string
 	// MaxBodyBytes caps request bodies to prevent trivial DoS.
 	// Default 1 MiB when zero.
 	MaxBodyBytes int64
@@ -73,8 +78,9 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
-	if cfg.Token == "" {
-		cfg.Logger.Warn("server: no Token configured; all requests will be accepted (do not do this in production)")
+	auth, err := chooseAuthenticator(cfg)
+	if err != nil {
+		return nil, err
 	}
 	cat, err := loadCatalogue(cfg.CatalogueDir)
 	if err != nil {
@@ -85,8 +91,32 @@ func New(cfg Config) (*Server, error) {
 		log:  cfg.Logger,
 		cat:  cat,
 		runs: newRunManager(cfg.RunsDir, cfg.Logger),
-		auth: BearerToken(cfg.Token),
+		auth: auth,
 	}, nil
+}
+
+// chooseAuthenticator picks between the single-token (Bearer) and the
+// file-driven RBAC backends. AuthFile always wins when present; otherwise
+// Token is used; otherwise the empty-token permissive mode logs a warning.
+func chooseAuthenticator(cfg Config) (Authenticator, error) {
+	if cfg.AuthFile != "" {
+		af, err := LoadAuthFile(cfg.AuthFile)
+		if err != nil {
+			return nil, err
+		}
+		if af == nil {
+			return nil, fmt.Errorf("server: AuthFile %q does not exist", cfg.AuthFile)
+		}
+		cfg.Logger.Info("server: RBAC enabled",
+			"tokens", len(af.Tokens),
+			"roles", len(af.Roles),
+		)
+		return RBACFromFile(af), nil
+	}
+	if cfg.Token == "" {
+		cfg.Logger.Warn("server: no Token or AuthFile configured; all requests will be accepted (do not do this in production)")
+	}
+	return BearerToken(cfg.Token), nil
 }
 
 // Handler returns the http.Handler with all routes wired.
