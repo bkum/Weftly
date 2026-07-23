@@ -28,11 +28,19 @@ func (b bearerToken) Principal(r *http.Request) (string, bool) {
 	if b == "" {
 		return "anon", true
 	}
-	h := r.Header.Get("Authorization")
-	if !strings.HasPrefix(h, "Bearer ") {
+	got := ""
+	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		got = strings.TrimPrefix(h, "Bearer ")
+	} else if q := r.URL.Query().Get("token"); q != "" {
+		// EventSource in the browser cannot set custom headers, so the SPA
+		// falls back to ?token=... on SSE URLs. Anything else should keep
+		// using the header for cleanliness — but we accept both uniformly
+		// so the auth surface is one code path.
+		got = q
+	}
+	if got == "" {
 		return "", false
 	}
-	got := strings.TrimPrefix(h, "Bearer ")
 	if subtle.ConstantTimeCompare([]byte(got), []byte(b)) != 1 {
 		return "", false
 	}

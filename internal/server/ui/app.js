@@ -1,0 +1,351 @@
+/* Weftly SPA — vanilla ES modules, no build step.
+ *
+ * State model:
+ *   - hash-based routing: #/, #/workflow/<id>, #/runs/<id>, #/history
+ *   - localStorage['weftly.token'] holds the bearer token; user prompted
+ *     on first API 401.
+ *   - each view calls into api() then renders into #app via <template>
+ *     cloning; there is no framework — we lean on the DOM.
+ */
+
+const TOKEN_KEY = "weftly.token";
+const $ = (sel, root = document) => root.querySelector(sel);
+const el = (tmplId) => document.getElementById(tmplId).content.firstElementChild.cloneNode(true);
+
+// --------------- auth + fetch wrapper -------------------
+
+function getToken() {
+  return localStorage.getItem(TOKEN_KEY) || "";
+}
+function setToken(v) {
+  if (v) localStorage.setItem(TOKEN_KEY, v);
+  else localStorage.removeItem(TOKEN_KEY);
+}
+async function api(path, opts = {}) {
+  const headers = new Headers(opts.headers || {});
+  const t = getToken();
+  if (t) headers.set("Authorization", "Bearer " + t);
+  if (opts.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  const res = await fetch(path, { ...opts, headers });
+  if (res.status === 401) {
+    const tok = prompt("API bearer token:", t || "");
+    if (tok) {
+      setToken(tok);
+      return api(path, opts);
+    }
+    throw new Error("Unauthorized");
+  }
+  return res;
+}
+
+// --------------- shell + routing -----------------------
+
+function renderShell() {
+  const app = $("#app");
+  app.innerHTML = "";
+  const shell = el("tmpl-shell");
+  app.appendChild(shell);
+  // highlight nav
+  const nav = (window.location.hash || "#/").startsWith("#/history") ? "history" : "catalogue";
+  shell.querySelectorAll(".wf-nav a").forEach((a) => {
+    if (a.dataset.nav === nav) a.setAttribute("aria-current", "page");
+  });
+  return shell.querySelector(".wf-main");
+}
+
+function route() {
+  const hash = window.location.hash || "#/";
+  if (hash === "#/" || hash === "") return renderCatalogue();
+  if (hash.startsWith("#/workflow/")) return renderForm(hash.slice("#/workflow/".length));
+  if (hash.startsWith("#/runs/")) return renderRun(hash.slice("#/runs/".length));
+  if (hash === "#/history") return renderHistory();
+  renderCatalogue();
+}
+window.addEventListener("hashchange", route);
+
+// --------------- catalogue view ------------------------
+
+async function renderCatalogue() {
+  const main = renderShell();
+  const page = el("tmpl-catalogue");
+  main.appendChild(page);
+  let workflows = [];
+  try {
+    const r = await api("/workflows");
+    if (!r.ok) throw new Error(await r.text());
+    workflows = (await r.json()).workflows || [];
+  } catch (e) {
+    page.querySelector('[data-role="grid"]').textContent = "Error loading workflows: " + e.message;
+    return;
+  }
+  const grid = page.querySelector('[data-role="grid"]');
+  const search = page.querySelector('[data-role="search"]');
+  const draw = (term) => {
+    grid.innerHTML = "";
+    const t = (term || "").toLowerCase();
+    for (const w of workflows) {
+      if (t && !(w.id + " " + w.name + " " + (w.description || "")).toLowerCase().includes(t)) continue;
+      const card = el("tmpl-workflow-card");
+      card.setAttribute("href", "#/workflow/" + encodeURIComponent(w.id));
+      card.querySelector('[data-role="title"]').textContent = w.name || w.id;
+      card.querySelector('[data-role="desc"]').textContent = w.description || "";
+      const inputs = Object.keys(w.inputs || {});
+      card.querySelector('[data-role="steps"]').textContent =
+        inputs.length ? inputs.length + " input" + (inputs.length > 1 ? "s" : "") : "no inputs";
+      grid.appendChild(card);
+    }
+    if (!grid.children.length) grid.textContent = "No workflows match.";
+  };
+  search.addEventListener("input", (e) => draw(e.target.value));
+  draw("");
+}
+
+// --------------- form view -----------------------------
+
+async function renderForm(id) {
+  const main = renderShell();
+  const page = el("tmpl-form");
+  main.appendChild(page);
+  const r = await api("/workflows/" + encodeURIComponent(id));
+  if (!r.ok) {
+    page.querySelector('[data-role="fields"]').textContent = "Workflow not found.";
+    return;
+  }
+  const wf = await r.json();
+  page.querySelector('[data-role="title"]').textContent = wf.name || wf.id;
+  page.querySelector('[data-role="desc"]').textContent = wf.description || "";
+
+  const fields = page.querySelector('[data-role="fields"]');
+  const inputs = wf.inputs || {};
+  const entries = Object.entries(inputs);
+  const values = {};
+  for (const [name, spec] of entries) {
+    const wrap = document.createElement("div");
+    wrap.className = "wf-field";
+    if (spec.description && spec.description.length > 60) wrap.classList.add("full");
+    const label = document.createElement("label");
+    label.className = "wf-label";
+    label.textContent = name;
+    if (spec.required) {
+      const req = document.createElement("span");
+      req.className = "wf-req";
+      req.textContent = "*";
+      label.appendChild(req);
+    }
+    wrap.appendChild(label);
+    let input;
+    if (spec.type === "bool") {
+      input = document.createElement("select");
+      input.className = "wf-select";
+      for (const opt of ["", "true", "false"]) {
+        const o = document.createElement("option");
+        o.value = opt;
+        o.textContent = opt || "(default)";
+        input.appendChild(o);
+      }
+    } else if (spec.type === "number") {
+      input = document.createElement("input");
+      input.type = "number";
+      input.className = "wf-input";
+    } else {
+      input = document.createElement("input");
+      input.type = spec.secret ? "password" : "text";
+      input.className = "wf-input";
+    }
+    if (spec.default !== undefined && spec.default !== null) {
+      input.value = String(spec.default);
+      values[name] = spec.default;
+    }
+    input.addEventListener("input", (e) => (values[name] = e.target.value));
+    wrap.appendChild(input);
+    if (spec.description) {
+      const help = document.createElement("div");
+      help.className = "wf-help";
+      help.textContent = spec.description;
+      wrap.appendChild(help);
+    }
+    fields.appendChild(wrap);
+  }
+
+  const status = page.querySelector('[data-role="status"]');
+  const submit = page.querySelector('[data-role="submit"]');
+  submit.addEventListener("click", async () => {
+    submit.disabled = true;
+    status.textContent = "Starting…";
+    try {
+      const r = await api("/runs", {
+        method: "POST",
+        body: JSON.stringify({ workflow: id, inputs: coerceInputs(inputs, values) }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      const { run_id } = await r.json();
+      window.location.hash = "#/runs/" + encodeURIComponent(run_id);
+    } catch (e) {
+      status.textContent = "Error: " + e.message;
+      submit.disabled = false;
+    }
+  });
+}
+
+function coerceInputs(schema, values) {
+  const out = {};
+  for (const [k, v] of Object.entries(values)) {
+    if (v === "" || v === undefined) continue;
+    const spec = schema[k] || {};
+    if (spec.type === "number") out[k] = Number(v);
+    else if (spec.type === "bool") out[k] = v === "true";
+    else out[k] = String(v);
+  }
+  return out;
+}
+
+// --------------- live run view -------------------------
+
+async function renderRun(runID) {
+  const main = renderShell();
+  const page = el("tmpl-live");
+  main.appendChild(page);
+  page.querySelector('[data-role="title"]').textContent = "Run";
+  page.querySelector('[data-role="runid"]').textContent = runID;
+  const badge = page.querySelector('[data-role="badge"]');
+  const stepsEl = page.querySelector('[data-role="steps"]');
+  const summaryEl = page.querySelector('[data-role="summary"]');
+  const summaryBody = page.querySelector('[data-role="summary-body"]');
+  const artifactsEl = page.querySelector('[data-role="artifacts"]');
+  const artifactList = page.querySelector('[data-role="artifact-list"]');
+  const conn = page.querySelector('[data-role="conn"]');
+
+  badge.textContent = "running";
+  badge.className = "wf-badge running";
+
+  const stepMap = new Map();
+  const ensureStep = (id, name, action) => {
+    if (stepMap.has(id)) return stepMap.get(id);
+    const li = document.createElement("li");
+    li.className = "wf-step";
+    li.innerHTML =
+      '<div class="wf-step-header">' +
+        '<span class="wf-step-glyph">•</span>' +
+        '<span class="wf-step-name"></span>' +
+        '<span class="wf-step-meta"></span>' +
+      '</div>' +
+      '<div class="wf-step-logs" hidden></div>';
+    li.querySelector(".wf-step-name").textContent = name || id;
+    li.querySelector(".wf-step-meta").textContent = action || "";
+    const logs = li.querySelector(".wf-step-logs");
+    li.querySelector(".wf-step-header").addEventListener("click", () => {
+      logs.hidden = !logs.hidden;
+    });
+    stepsEl.appendChild(li);
+    const rec = { li, logs, glyph: li.querySelector(".wf-step-glyph"), meta: li.querySelector(".wf-step-meta") };
+    stepMap.set(id, rec);
+    return rec;
+  };
+
+  const glyphs = {
+    running: '<span style="color:var(--accent-2)">◐</span>',
+    success: '<span style="color:var(--ok)">✓</span>',
+    failed: '<span style="color:var(--err)">✗</span>',
+    "timed-out": '<span style="color:var(--err)">✗</span>',
+    "failed-continued": '<span style="color:var(--warn)">⚠</span>',
+    skipped: '<span style="color:var(--fg-faint)">⊘</span>',
+  };
+
+  const handle = (e) => {
+    const ev = e.event || e;
+    switch (e.type || e.event?.type) {
+      case "RunStarted":
+        page.querySelector('[data-role="title"]').textContent = ev.Workflow || "Run";
+        break;
+      case "StepStarted": {
+        const s = ensureStep(ev.StepID, ev.Name, ev.Action);
+        s.glyph.innerHTML = glyphs.running;
+        break;
+      }
+      case "StepLog": {
+        const s = ensureStep(ev.StepID);
+        s.logs.hidden = false;
+        const line = document.createElement("div");
+        line.className =
+          ev.Stream === "stderr" ? "stderr" : ev.Stream === "info" ? "info" : "out-line";
+        line.textContent = ev.Line || "";
+        s.logs.appendChild(line);
+        s.logs.scrollTop = s.logs.scrollHeight;
+        break;
+      }
+      case "StepOutput": {
+        const s = ensureStep(ev.StepID);
+        s.logs.hidden = false;
+        const line = document.createElement("div");
+        line.className = "info";
+        line.textContent = "→ " + ev.Key + "=" + (typeof ev.Value === "string" ? ev.Value : JSON.stringify(ev.Value));
+        s.logs.appendChild(line);
+        break;
+      }
+      case "StepFinished": {
+        const s = ensureStep(ev.StepID);
+        s.glyph.innerHTML = glyphs[ev.Status] || "•";
+        const dur = ev.Duration ? Math.round(ev.Duration / 1e6) + "ms" : "";
+        s.meta.textContent = (ev.Resumed ? "(resumed) " : "") + ev.Status + (dur ? " · " + dur : "");
+        break;
+      }
+      case "SummaryEmitted": {
+        summaryEl.hidden = false;
+        const div = document.createElement("div");
+        div.textContent = ev.Markdown || "";
+        div.style.whiteSpace = "pre-wrap";
+        summaryBody.appendChild(div);
+        break;
+      }
+      case "ArtifactUploaded": {
+        artifactsEl.hidden = false;
+        const li = document.createElement("li");
+        const a = document.createElement("a");
+        a.href = "/runs/" + encodeURIComponent(runID) + "/artifacts/" + encodeURIComponent(basename(ev.Path));
+        a.textContent = ev.Name || basename(ev.Path);
+        li.appendChild(a);
+        li.appendChild(document.createTextNode(" (" + ev.Size + " bytes)"));
+        artifactList.appendChild(li);
+        break;
+      }
+      case "RunFinished":
+        badge.textContent = ev.Status;
+        badge.className = "wf-badge " + ev.Status;
+        break;
+    }
+  };
+
+  // Auth: EventSource can't set headers, so we pass the token as a query
+  // string. The server middleware also accepts ?token= as an alternative
+  // to the Authorization header (see server/middleware.go).
+  const t = getToken();
+  const src = new EventSource("/runs/" + encodeURIComponent(runID) + "/events" + (t ? "?token=" + encodeURIComponent(t) : ""));
+  src.onmessage = (ev) => {
+    try { handle(JSON.parse(ev.data)); } catch (_) {}
+  };
+  src.onopen = () => { conn.hidden = true; };
+  src.onerror = () => { conn.hidden = false; };
+}
+
+function basename(p) {
+  return (p || "").split("/").pop();
+}
+
+// --------------- history view --------------------------
+
+async function renderHistory() {
+  const main = renderShell();
+  const page = el("tmpl-history");
+  main.appendChild(page);
+  const list = page.querySelector('[data-role="list"]');
+  // No dedicated /runs listing endpoint yet — Phase 3. For now the view
+  // reminds the user how to reach a run directly.
+  const empty = document.createElement("div");
+  empty.className = "wf-sub";
+  empty.textContent =
+    "Run history browsing is a Phase 3 feature. Runs remain accessible at #/runs/<run-id> and on disk under ./.weftly/runs/.";
+  list.appendChild(empty);
+}
+
+// bootstrap
+route();

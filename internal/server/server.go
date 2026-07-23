@@ -90,6 +90,7 @@ func New(cfg Config) (*Server, error) {
 // Handler returns the http.Handler with all routes wired.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	// API
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /workflows", s.handleListWorkflows)
 	mux.HandleFunc("GET /workflows/{id}", s.handleGetWorkflow)
@@ -97,13 +98,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /runs/{id}", s.handleGetRun)
 	mux.HandleFunc("GET /runs/{id}/events", s.handleRunEvents)
 	mux.HandleFunc("GET /runs/{id}/artifacts/{name}", s.handleArtifact)
+	// UI (unauthenticated shell; the SPA does authenticated API calls)
+	ui := uiHandler()
+	mux.Handle("GET /", ui)
+	mux.Handle("GET /app.js", ui)
+	mux.Handle("GET /styles.css", ui)
+	mux.Handle("GET /favicon.ico", ui)
 
 	// Order matters: request-size cap first so any handler that reads the
-	// body benefits; then auth. /healthz stays unauthenticated so
-	// upstream probes work.
+	// body benefits; then auth. /healthz and the SPA shell paths stay
+	// unauthenticated so external probes and initial page loads work.
 	var h http.Handler = mux
 	h = withMaxBody(h, s.cfg.MaxBodyBytes)
-	h = withAuth(h, s.auth, s.log, "/healthz")
+	h = withAuth(h, s.auth, s.log, "/healthz", "/", "/app.js", "/styles.css", "/favicon.ico")
 	h = withAccessLog(h, s.log)
 	return h
 }
