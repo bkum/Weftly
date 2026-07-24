@@ -32,4 +32,4 @@ steps:
       # Hello, ${{ inputs.name }} 👋
       Ran two shell steps, resolved one input, and passed an output between them.
       Everything you need to write a real workflow is on the same three
-      surfaces: `run:`, `env:`, `${{ }}` expressions.
+      surfaces: `run:`, `env:`, and expression interpolation.
