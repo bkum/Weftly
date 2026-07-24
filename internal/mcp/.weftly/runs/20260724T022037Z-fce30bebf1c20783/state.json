@@ -1,0 +1,23 @@
+{
+  "run_id": "20260724T022037Z-fce30bebf1c20783",
+  "workflow": "smoke",
+  "workspace": "/home/user/Weftly/internal/mcp/.weftly/runs/20260724T022037Z-fce30bebf1c20783/workspace",
+  "started_at": "2026-07-24T02:20:37.023575541Z",
+  "finished_at": "2026-07-24T02:20:37.029184742Z",
+  "status": "success",
+  "steps": {
+    "hello": {
+      "action": "run",
+      "status": "success",
+      "duration_ns": 3516073,
+      "outputs": {
+        "greeting": "hi-there"
+      },
+      "started_at": "2026-07-24T02:20:37.024698564Z",
+      "finished_at": "2026-07-24T02:20:37.028546006Z"
+    }
+  },
+  "step_order": [
+    "hello"
+  ]
+}

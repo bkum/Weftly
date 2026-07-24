@@ -37,6 +37,23 @@ func resolveInputs(wf *schema.Workflow, supplied map[string]any) (map[string]any
 		if err != nil {
 			return nil, nil, fmt.Errorf("input %q: %w", name, err)
 		}
+		if len(in.Enum) > 0 {
+			// Compare via fmt.Sprintf so `type: string` inputs match a
+			// numeric enum entry and vice versa — the YAML author's
+			// declared allowed-set is authoritative, not Go's type
+			// system.
+			ok := false
+			sv := fmt.Sprintf("%v", v)
+			for _, allowed := range in.Enum {
+				if fmt.Sprintf("%v", allowed) == sv {
+					ok = true
+					break
+				}
+			}
+			if !ok {
+				return nil, nil, fmt.Errorf("input %q: %v is not one of %v", name, v, in.Enum)
+			}
+		}
 		out[name] = v
 		if in.Secret {
 			secretVals = append(secretVals, v)

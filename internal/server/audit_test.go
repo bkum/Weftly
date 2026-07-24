@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bkum/weftly/internal/server"
 )
@@ -28,10 +29,19 @@ func TestAuditRecordsPOSTRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var created struct {
+		RunID string `json:"run_id"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&created)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("POST /runs: %d", resp.StatusCode)
 	}
+	// Wait for the async engine goroutine to reach RunFinished so it
+	// isn't still writing state.json / report.html into the TempDir
+	// when the test returns — otherwise t.Cleanup's RemoveAll trips
+	// with "directory not empty" (seen intermittently on ubuntu CI).
+	waitForRunFinish(t, ts.URL, "tk", created.RunID)
 	// GET /audit — bearer-token principal is admin, should be allowed.
 	req, _ = http.NewRequest("GET", ts.URL+"/audit", nil)
 	req.Header.Set("Authorization", "Bearer tk")
@@ -69,6 +79,35 @@ func TestAuditRecordsPOSTRuns(t *testing.T) {
 	if !strings.Contains(string(data), `"workflow":"`+wfID+`"`) {
 		t.Errorf("audit file missing workflow entry:\n%s", data)
 	}
+}
+
+// waitForRunFinish polls GET /runs/{id} until state.json's status
+// leaves "running", or a short deadline elapses. Purely a housekeeping
+// helper so a test's t.TempDir() can be cleaned up without racing the
+// engine goroutine that keeps writing state.json / report.html after
+// POST /runs has already returned 202.
+func waitForRunFinish(t *testing.T, base, tok, id string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		req, _ := http.NewRequest("GET", base+"/runs/"+id, nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		var body struct {
+			Status string `json:"status"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		resp.Body.Close()
+		if body.Status != "" && body.Status != "running" && body.Status != "pending" {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("run %s did not finish within deadline", id)
 }
 
 func TestAuditSkipsGETRequests(t *testing.T) {
