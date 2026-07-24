@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -257,8 +258,29 @@ func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no") // disable proxy buffering
 	w.WriteHeader(http.StatusOK)
 
+	// On reconnect, EventSource sends Last-Event-ID with the last id
+	// it saw. Skip replay up to and including that number so the SPA
+	// doesn't get duplicate lines (which the SPA renders as if the
+	// step retried, which then looks like an infinite loop). The id
+	// is the event's index in rec.events; a client that never saw an
+	// id (fresh connection) gets everything.
+	lastSeen := -1
+	if h := r.Header.Get("Last-Event-ID"); h != "" {
+		if n, err := strconv.Atoi(h); err == nil {
+			lastSeen = n
+		}
+	}
+
 	snap, live := rec.subscribe()
+	// Sequence counter — same as the event's position in the record's
+	// append-only log. `snap` was `events[:len(snap)]` at subscribe
+	// time, and every subsequent live event is index len(snap)+i.
+	seq := 0
 	writeSSE := func(e events.Event) bool {
+		defer func() { seq++ }()
+		if seq <= lastSeen {
+			return true // replay already delivered
+		}
 		payload, err := json.Marshal(map[string]any{
 			"type":  eventTypeName(e),
 			"event": e,
@@ -266,7 +288,7 @@ func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return false
 		}
-		if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
+		if _, err := fmt.Fprintf(w, "id: %d\ndata: %s\n\n", seq, payload); err != nil {
 			return false
 		}
 		flusher.Flush()
