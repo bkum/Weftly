@@ -32,7 +32,7 @@ func (uploadAction) Validate(cfg StepConfig) error {
 	return nil
 }
 
-func (uploadAction) Run(_ context.Context, sc *StepContext) (Outputs, error) {
+func (uploadAction) Run(ctx context.Context, sc *StepContext) (Outputs, error) {
 	pathNode := findChild(sc.Config, "path")
 	nameNode := findChild(sc.Config, "name")
 	p, err := interpString(sc, pathNode)
@@ -89,7 +89,7 @@ func (uploadAction) Run(_ context.Context, sc *StepContext) (Outputs, error) {
 		// mirror failure logs and continues rather than failing the run —
 		// the artifact is still available on disk.
 		if sc.ArtifactStore != nil {
-			if err := mirrorToStore(sc, dst, fi.Size()); err != nil {
+			if err := mirrorToStore(ctx, sc, dst, fi.Size()); err != nil {
 				sc.Log(events.Info, fmt.Sprintf("artifact store: mirror of %s failed: %v", filepath.Base(m), err))
 			}
 		}
@@ -101,8 +101,11 @@ func (uploadAction) Run(_ context.Context, sc *StepContext) (Outputs, error) {
 
 // mirrorToStore reads a local artifact file back and Puts it into the
 // configured remote store under key "<run-id>/<basename>". Called only
-// when sc.ArtifactStore is non-nil.
-func mirrorToStore(sc *StepContext, path string, size int64) error {
+// when sc.ArtifactStore is non-nil. Honours the step context so a
+// cancelled run also cancels any in-flight S3 upload — previously
+// the upload kept going against context.Background() long after the
+// operator had already hit DELETE /runs/{id}.
+func mirrorToStore(ctx context.Context, sc *StepContext, path string, size int64) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -112,7 +115,7 @@ func mirrorToStore(sc *StepContext, path string, size int64) error {
 	if sc.RunID != "" {
 		key = sc.RunID + "/" + key
 	}
-	return sc.ArtifactStore.Put(context.Background(), key, f, size, "")
+	return sc.ArtifactStore.Put(ctx, key, f, size, "")
 }
 
 func copyFile(src, dst string) error {

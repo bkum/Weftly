@@ -158,6 +158,18 @@ func (s *Server) auditMiddleware(h http.HandlerFunc, extract func(*http.Request)
 			wf, sc = extract(r)
 		}
 		h(sw, r)
+		runID := r.PathValue("id")
+		// POST /runs has no {id} in the path — the run id is minted in
+		// the handler and returned in the response body. Peek that
+		// body so the audit entry captures which run was created.
+		if runID == "" && sw.body.Len() > 0 {
+			var v struct {
+				RunID string `json:"run_id"`
+			}
+			if json.Unmarshal(sw.body.Bytes(), &v) == nil {
+				runID = v.RunID
+			}
+		}
 		s.audit.Record(AuditEntry{
 			Time:       time.Now().UTC(),
 			Principal:  PrincipalFromContext(r.Context()).Name,
@@ -165,7 +177,7 @@ func (s *Server) auditMiddleware(h http.HandlerFunc, extract func(*http.Request)
 			Path:       r.URL.Path,
 			Workflow:   wf,
 			Schedule:   sc,
-			RunID:      r.PathValue("id"),
+			RunID:      runID,
 			Status:     sw.status,
 			RemoteAddr: r.RemoteAddr,
 		})
@@ -174,15 +186,34 @@ func (s *Server) auditMiddleware(h http.HandlerFunc, extract func(*http.Request)
 
 // statusRecorder is a tiny ResponseWriter wrapper that remembers the
 // status code so the audit middleware can record it. If a handler
-// never calls WriteHeader, the default 200 kicks in.
+// never calls WriteHeader, the default 200 kicks in. It also snoops a
+// bounded prefix of the response body so a JSON envelope like
+// {"run_id":"..."} can be surfaced to the audit entry.
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
+	body   bytes.Buffer
 }
 
 func (s *statusRecorder) WriteHeader(code int) {
 	s.status = code
 	s.ResponseWriter.WriteHeader(code)
+}
+
+// Write shadows the body up to bodyPeekCap bytes, then delegates the
+// full slice to the underlying writer. Small runs' responses are
+// always well under the cap; larger responses (SSE, artifact serves)
+// use handlers that skip the audit middleware.
+func (s *statusRecorder) Write(p []byte) (int, error) {
+	const bodyPeekCap = 4 * 1024
+	if s.body.Len() < bodyPeekCap {
+		need := bodyPeekCap - s.body.Len()
+		if need > len(p) {
+			need = len(p)
+		}
+		s.body.Write(p[:need])
+	}
+	return s.ResponseWriter.Write(p)
 }
 
 // Unwrap lets net/http's Hijacker/Flusher chain work through the wrapper.

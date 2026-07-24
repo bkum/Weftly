@@ -47,7 +47,7 @@ func runServe(t *testing.T, dir string, requests ...string) []map[string]any {
 	var out, errBuf bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := Serve(ctx, Config{Dir: dir, In: in, Out: &out, Err: &errBuf}); err != nil {
+	if err := Serve(ctx, Config{Dir: dir, BaseDir: t.TempDir(), In: in, Out: &out, Err: &errBuf}); err != nil {
 		t.Fatalf("Serve: %v; stderr:\n%s", err, errBuf.String())
 	}
 	var out2 []map[string]any

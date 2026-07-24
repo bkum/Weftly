@@ -160,6 +160,7 @@ func (m *runManager) start(_ context.Context, wfID string, wf *schema.Workflow, 
 			Bus:             bus,
 			ArtifactStore:   m.store,
 			PostSubscribers: []func(events.Event){rec.handle},
+			Logger:          m.log,
 		})
 		errCh <- err
 		// Belt and braces: even with post-subscriber ordering, close the
