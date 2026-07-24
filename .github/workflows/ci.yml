@@ -84,7 +84,7 @@ jobs:
           file weftly
           ./weftly version
       - name: validate flagship example
-        run: ./weftly validate examples/petclinic-onboarding.yml
+        run: ./weftly validate workflows/petclinic-onboarding.yml
       - uses: actions/upload-artifact@v7
         with:
           name: weftly-linux-amd64

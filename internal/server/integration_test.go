@@ -35,7 +35,7 @@ func TestServerFullFlagshipE2E(t *testing.T) {
 
 	// Build a catalogue dir that contains just the flagship workflow.
 	cat := t.TempDir()
-	src := filepath.Join("..", "..", "examples", "petclinic-onboarding.yml")
+	src := filepath.Join("..", "..", "workflows", "petclinic-onboarding.yml")
 	b, err := os.ReadFile(src)
 	if err != nil {
 		t.Skipf("example not accessible: %v", err)

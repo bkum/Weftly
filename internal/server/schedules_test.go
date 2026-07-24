@@ -154,25 +154,10 @@ func TestSchedulesTriggerLaunchesRun(t *testing.T) {
 		t.Fatalf("empty run_id in response")
 	}
 
-	// Wait briefly for the run to reach /runs — the run is dispatched
-	// asynchronously (engine goroutine) but the runManager returns
-	// after RunStarted fires, so it should be visible quickly.
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		req, _ = http.NewRequest("GET", ts.URL+"/runs/"+body.RunID, nil)
-		req.Header.Set("Authorization", "Bearer tk")
-		resp, err = http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		status := resp.StatusCode
-		resp.Body.Close()
-		if status == 200 {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("triggered run %q never became visible in /runs", body.RunID)
+	// The run is dispatched asynchronously (engine goroutine). Wait for
+	// it to reach a terminal state so t.TempDir() cleanup doesn't race
+	// state.json / report.html writes that keep landing after 202.
+	waitForRunFinish(t, ts.URL, "tk", body.RunID)
 }
 
 func TestSchedulesDisabledServerRespondsEmpty(t *testing.T) {

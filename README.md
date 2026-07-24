@@ -28,13 +28,13 @@ CGO_ENABLED=0 go build -o weftly ./cmd/weftly
 Validate a workflow without running it:
 
 ```
-weftly validate examples/petclinic-onboarding.yml
+weftly validate workflows/petclinic-onboarding.yml
 ```
 
 Run the flagship example against any [Spring PetClinic REST](https://github.com/spring-petclinic/spring-petclinic-rest)-shaped endpoint:
 
 ```
-weftly run examples/petclinic-onboarding.yml \
+weftly run workflows/petclinic-onboarding.yml \
   --input env_url=http://localhost:9966/petclinic \
   --input api_key=$PETCLINIC_KEY \
   --input owner_last=Doe
@@ -181,8 +181,8 @@ catalogue"* — no arbitrary YAML is ever accepted over the wire (spec
 §16).
 
 ```
-mkdir -p ./workflows
-cp examples/petclinic-onboarding.yml ./workflows/
+# The release tarball already ships a ready-to-use ./workflows/ dir
+# containing hello.yml + petclinic-onboarding.yml, so this is enough:
 export WEFTLY_TOKEN=$(head -c 32 /dev/urandom | base64)
 weftly server --dir ./workflows --addr :8080
 ```
@@ -328,7 +328,7 @@ go test ./...
 
 The flagship end-to-end test spins up an in-process mock PetClinic
 server (`internal/mockpetclinic`) and executes
-`examples/petclinic-onboarding.yml` against it. It skips automatically if
+`workflows/petclinic-onboarding.yml` against it. It skips automatically if
 `curl` or `jq` isn't on `PATH`.
 
 ## Design
