@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/bkum/weftly/internal/events"
@@ -101,17 +100,14 @@ func (r runAction) Run(ctx context.Context, sc *StepContext) (Outputs, error) {
 		cmd.Dir = sc.Workdir
 		cmd.Env = buildEnv(sc, outputPath)
 	}
+	// Platform-specific process-group setup (POSIX: Setpgid=true) +
+	// cancel hook (POSIX: SIGKILL to -pgid; Windows: default cmd.Cancel
+	// which kills the process). Splitting these behind build tags keeps
+	// the file compilable for windows/amd64 in the release build —
+	// syscall.Kill / SysProcAttr.Setpgid don't exist there and no
+	// runtime `if runtime.GOOS != "windows"` guard can hide the missing
+	// symbols from the compiler.
 	setupProcessGroup(cmd)
-	// On context cancel (timeout or user), kill the whole process group,
-	// not just the parent shell. Without this, an orphaned grandchild
-	// like `sleep 5` inside a killed bash keeps the inherited stdio FDs
-	// open and the WaitDelay pipe-close path never actually fires.
-	// Setpgid=true in setupProcessGroup guarantees pgid == pid.
-	if runtime.GOOS != "windows" {
-		cmd.Cancel = func() error {
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-	}
 	// WaitDelay force-closes the stdio pipes if a grandchild survives
 	// the process-group kill and keeps them open (e.g. `sleep 5` inside
 	// a killed bash). exec joins on the internal copy goroutines
@@ -343,16 +339,6 @@ func exitDescription(err error) string {
 	return err.Error()
 }
 
-// --- platform-specific process-group handling ---
-
-func setupProcessGroup(cmd *exec.Cmd) {
-	if cmd.SysProcAttr == nil {
-		cmd.SysProcAttr = &syscall.SysProcAttr{}
-	}
-	if runtime.GOOS != "windows" {
-		cmd.SysProcAttr.Setpgid = true
-	}
-}
-
-// Process-group cancel is wired via cmd.Cancel above; this file used to
-// hold a killProcessGroup helper, now inlined at the cancel site.
+// Platform-specific process-group setup + cancel hook live in
+// run_unix.go / run_windows.go behind build tags — syscall.Kill and
+// SysProcAttr.Setpgid aren't defined on Windows.
