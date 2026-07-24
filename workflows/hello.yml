@@ -1,0 +1,35 @@
+name: hello
+description: >
+  Zero-dependency starter workflow. Confirms the binary works end to
+  end (shell dispatch, env resolution, expression interpolation,
+  outputs, and the report). Run with:
+
+    weftly run workflows/hello.yml --input name=you
+
+  or, in server mode, POST /runs with {"workflow":"hello","inputs":{"name":"you"}}.
+
+inputs:
+  name:
+    description: Who to greet
+    default: world
+
+steps:
+  - id: greet
+    name: Greet
+    run: |
+      echo "hello, $NAME!"
+      echo "greeting=hello-$NAME" >> "$WEFTLY_OUTPUT"
+    env:
+      NAME: "${{ inputs.name }}"
+
+  - id: echo_back
+    name: Echo the previous step's output
+    run: echo "step greet said $GREETING"
+    env:
+      GREETING: "${{ steps.greet.outputs.greeting }}"
+
+  - summary: |
+      # Hello, ${{ inputs.name }} 👋
+      Ran two shell steps, resolved one input, and passed an output between them.
+      Everything you need to write a real workflow is on the same three
+      surfaces: `run:`, `env:`, `${{ }}` expressions.

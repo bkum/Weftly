@@ -41,9 +41,15 @@ archives:
       - LICENSE
       - NOTICE
       - CHANGELOG.md
-      # Bundle the shipped examples so a downloaded tarball runs out
-      # of the box: `weftly run examples/petclinic-onboarding.yml`,
-      # plus the schedules.yaml + weftly.yaml RBAC templates.
+      # Ship a workflows/ directory so `weftly server --dir ./workflows`
+      # and `weftly run workflows/hello.yml` work with zero setup after
+      # extracting the tarball. The hello workflow needs no external
+      # services; the petclinic one demonstrates the full REST + assert
+      # + upload path against a running PetClinic.
+      - workflows/**/*
+      # examples/ carries operator config templates (schedules.yaml,
+      # weftly.yaml RBAC file) — reference material, not runnable
+      # workflows.
       - examples/**/*
 
 checksum:

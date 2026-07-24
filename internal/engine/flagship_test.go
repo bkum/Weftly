@@ -17,7 +17,7 @@ import (
 	"github.com/bkum/weftly/internal/schema"
 )
 
-// TestFlagshipWorkflowE2E runs examples/petclinic-onboarding.yml against
+// TestFlagshipWorkflowE2E runs workflows/petclinic-onboarding.yml against
 // an in-process mock server. It exercises every core mechanism named in
 // the spec's DoD: declarative http, idempotent `if:`, http→run/jq
 // handoff, env-var-safe secret passing, template rendering, summary, and
@@ -33,7 +33,7 @@ func TestFlagshipWorkflowE2E(t *testing.T) {
 	srv := mockpetclinic.New(apiKey)
 	defer srv.Close()
 
-	wfPath := filepath.Join("..", "..", "examples", "petclinic-onboarding.yml")
+	wfPath := filepath.Join("..", "..", "workflows", "petclinic-onboarding.yml")
 	wf, err := schema.Load(wfPath)
 	if err != nil {
 		t.Fatalf("load: %v", err)
