@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -54,6 +55,12 @@ type Options struct {
 	// (state.json / report.html / artifacts) without racing the
 	// filesystem. Empty in CLI mode.
 	PostSubscribers []func(events.Event)
+
+	// Logger, when non-nil, is handed to internal writers (state.json,
+	// audit-adjacent code paths) so a persistence failure (disk full,
+	// read-only mount) is surfaced instead of silently swallowed.
+	// Server mode wires the server's logger here; CLI leaves it nil.
+	Logger *slog.Logger
 }
 
 // Result summarises a completed run.
@@ -126,6 +133,7 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 
 	// State + report writers subscribe to the same bus every renderer sees.
 	sw := state.New(ws.Root, sec)
+	sw.Logger = opts.Logger
 	if opts.Resume != "" {
 		prior, _, _ := state.Load(filepath.Join(baseDir, "runs"), opts.Resume)
 		if prior != nil {

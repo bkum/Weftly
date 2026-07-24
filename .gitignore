@@ -3,3 +3,4 @@
 /.weftly/
 *.test
 *.out
+internal/mcp/.weftly/

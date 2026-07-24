@@ -400,7 +400,9 @@ async function renderRun(runID) {
         const line = document.createElement("div");
         line.className = "info";
         const delay = Math.round((ev.Delay || 0) / 1e6);
-        line.textContent = `↻ retrying (attempt ${ev.Attempt + 1}/${ev.Of} in ${delay}ms) — ${ev.Cause}`;
+        let text = `↻ retrying (attempt ${ev.Attempt + 1}/${ev.Of} in ${delay}ms) — ${ev.Cause}`;
+        if (ev.Err) text += `: ${ev.Err}`;
+        line.textContent = text;
         s.logs.appendChild(line);
         s.glyph.innerHTML = glyphs.running;
         break;
@@ -442,10 +444,12 @@ async function renderRun(runID) {
         artifactList.appendChild(li);
         break;
       }
-      case "RunFinished":
-        badge.textContent = ev.Status;
+      case "RunFinished": {
+        const dur = ev.Duration ? Math.round(ev.Duration / 1e6) + "ms" : "";
+        badge.textContent = ev.Status + (dur ? " · " + dur : "");
         badge.className = "wf-badge " + ev.Status;
         cancelBtn.hidden = true;
+      }
         // Close the EventSource so the browser stops reconnecting
         // every ~3s to a completed run — otherwise the server keeps
         // getting GET /runs/{id}/events forever from an idle tab.

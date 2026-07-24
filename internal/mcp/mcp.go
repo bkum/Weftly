@@ -35,9 +35,14 @@ import (
 // cache tool schemas after initialize).
 type Config struct {
 	Dir string // catalogue directory (*.yml / *.yaml)
-	In  io.Reader
-	Out io.Writer
-	Err io.Writer
+	// BaseDir is passed through to engine.Options.BaseDir so per-run
+	// state (.weftly/runs/...) lands in a caller-chosen location.
+	// Empty = engine default (./.weftly under cwd). Tests set an
+	// explicit temp dir so state files don't leak into the repo tree.
+	BaseDir string
+	In      io.Reader
+	Out     io.Writer
+	Err     io.Writer
 }
 
 // Serve runs the request loop until stdin closes or the context is
@@ -259,8 +264,9 @@ func (s *server) handleToolCall(ctx context.Context, req *rpcRequest) {
 		}
 	})
 	res, err := engine.Run(ctx, t.Workflow, engine.Options{
-		Inputs: p.Arguments,
-		Bus:    bus,
+		BaseDir: s.cfg.BaseDir,
+		Inputs:  p.Arguments,
+		Bus:     bus,
 	})
 	if err != nil {
 		s.replyError(req.ID, -32000, "engine: "+err.Error())

@@ -25,6 +25,23 @@ type Artifact struct {
 	Size int64
 }
 
+// Step is the per-step row rendered in the report's Steps table. It's
+// populated from the event stream so it captures retry attempts,
+// resume-replay, and cleanup-block runs that state.json also carries.
+type Step struct {
+	ID       string
+	Name     string
+	Action   string
+	Status   events.Status
+	Duration time.Duration
+	Err      string
+	Attempts int
+	Resumed  bool
+	// order is the insertion order — a stable render slot even when the
+	// map is repopulated on a retry.
+	order int
+}
+
 // Report accumulates report material for a single run.
 type Report struct {
 	Secrets *secrets.Registry
@@ -38,9 +55,28 @@ type Report struct {
 	startedAt  time.Time
 	finishedAt time.Time
 	status     events.Status
+	steps      map[string]*Step
+	stepOrder  []string // insertion order for stable render
 }
 
-func New(sec *secrets.Registry) *Report { return &Report{Secrets: sec} }
+func New(sec *secrets.Registry) *Report {
+	return &Report{Secrets: sec, steps: map[string]*Step{}}
+}
+
+// ensureStepLocked returns (creating if needed) the step record for id.
+// Caller holds r.mu.
+func (r *Report) ensureStepLocked(id string) *Step {
+	if r.steps == nil {
+		r.steps = map[string]*Step{}
+	}
+	if s, ok := r.steps[id]; ok {
+		return s
+	}
+	s := &Step{ID: id, order: len(r.stepOrder)}
+	r.steps[id] = s
+	r.stepOrder = append(r.stepOrder, id)
+	return s
+}
 
 // Handle is the events.Bus subscriber.
 func (r *Report) Handle(e events.Event) {
@@ -52,6 +88,28 @@ func (r *Report) Handle(e events.Event) {
 		r.runID = ev.RunID
 		r.workspace = ev.Workspace
 		r.startedAt = time.Now()
+	case events.StepStarted:
+		s := r.ensureStepLocked(ev.StepID)
+		s.Name = ev.Name
+		s.Action = ev.Action
+		s.Status = events.Running
+	case events.StepRetry:
+		s := r.ensureStepLocked(ev.StepID)
+		if ev.Attempt+1 > s.Attempts {
+			s.Attempts = ev.Attempt + 1
+		}
+	case events.StepFinished:
+		s := r.ensureStepLocked(ev.StepID)
+		s.Status = ev.Status
+		s.Duration = ev.Duration
+		s.Resumed = ev.Resumed
+		if ev.Err != nil {
+			msg := ev.Err.Error()
+			if r.Secrets != nil {
+				msg = r.Secrets.Mask(msg)
+			}
+			s.Err = msg
+		}
 	case events.SummaryEmitted:
 		md := ev.Markdown
 		if r.Secrets != nil {
@@ -84,6 +142,46 @@ func (r *Report) Write(path string) error {
 		html.EscapeString(string(r.status)),
 		html.EscapeString(r.finishedAt.Sub(r.startedAt).Round(time.Millisecond).String()),
 	)
+	if len(r.stepOrder) > 0 {
+		b.WriteString("<h2>Steps</h2>\n<table class=steps>\n")
+		b.WriteString("<thead><tr><th>Step</th><th>Action</th><th>Status</th><th>Duration</th><th>Detail</th></tr></thead>\n<tbody>\n")
+		for _, id := range r.stepOrder {
+			s := r.steps[id]
+			label := s.Name
+			if label == "" {
+				label = s.ID
+			}
+			dur := ""
+			if s.Duration > 0 {
+				dur = s.Duration.Round(time.Millisecond).String()
+			}
+			detail := ""
+			if s.Err != "" {
+				detail = "<code class=err>" + html.EscapeString(s.Err) + "</code>"
+			}
+			if s.Attempts > 1 {
+				if detail != "" {
+					detail += " "
+				}
+				detail += fmt.Sprintf("<span class=meta>attempts=%d</span>", s.Attempts)
+			}
+			if s.Resumed {
+				if detail != "" {
+					detail += " "
+				}
+				detail += "<span class=meta>(resumed)</span>"
+			}
+			fmt.Fprintf(&b, "  <tr><td><code>%s</code></td><td><code>%s</code></td><td><strong class=%s>%s</strong></td><td>%s</td><td>%s</td></tr>\n",
+				html.EscapeString(label),
+				html.EscapeString(s.Action),
+				statusClass(s.Status),
+				html.EscapeString(string(s.Status)),
+				html.EscapeString(dur),
+				detail,
+			)
+		}
+		b.WriteString("</tbody></table>\n")
+	}
 	if len(r.summaries) > 0 {
 		b.WriteString("<h2>Summary</h2>\n")
 		for _, s := range r.summaries {
@@ -232,6 +330,11 @@ const htmlPrefix = `<!doctype html>
   strong.err { color: #cf222e; }
   strong.warn { color: #9a6700; }
   strong.info { color: #57606a; }
+  table.steps { border-collapse: collapse; width: 100%; margin: .5rem 0 1.5rem; }
+  table.steps th, table.steps td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #eaecef; vertical-align: top; }
+  table.steps th { color: #57606a; font-weight: 500; }
+  code.err { background: #fff1f0; color: #cf222e; }
+  .meta { color: #57606a; font-size: 12px; }
 </style>
 </head><body>
 `

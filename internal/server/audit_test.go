@@ -58,6 +58,7 @@ func TestAuditRecordsPOSTRuns(t *testing.T) {
 			Method   string `json:"method"`
 			Path     string `json:"path"`
 			Workflow string `json:"workflow"`
+			RunID    string `json:"run_id"`
 			Status   int    `json:"status"`
 		}
 	}
@@ -70,6 +71,12 @@ func TestAuditRecordsPOSTRuns(t *testing.T) {
 	got := body2.Entries[0]
 	if got.Method != "POST" || got.Path != "/runs" || got.Workflow != wfID || got.Status != http.StatusAccepted {
 		t.Errorf("entry mismatch: %+v", got)
+	}
+	// POST /runs has no {id} in the URL path — the audit middleware
+	// now peeks the response body for run_id so grepping "who created
+	// run X" works. Assert that.
+	if got.RunID == "" || !strings.HasPrefix(got.RunID, "2026") {
+		t.Errorf("audit entry should capture run_id from response body, got %q", got.RunID)
 	}
 	// The on-disk file should have grown by at least one line.
 	data, err := os.ReadFile(auditPath)

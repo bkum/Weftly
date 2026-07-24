@@ -6,6 +6,7 @@ package state
 
 import (
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -46,9 +47,14 @@ type Run struct {
 type Writer struct {
 	Path    string
 	Secrets *secrets.Registry
+	// Logger receives one warning per Writer instance when the first
+	// flush fails — subsequent flush failures are silent to avoid
+	// spamming the log for e.g. a persistent full-disk. Nil = discard.
+	Logger *slog.Logger
 
-	mu  sync.Mutex
-	run *Run
+	mu             sync.Mutex
+	run            *Run
+	flushErrLogged bool
 }
 
 // New returns a Writer that persists state to file. dir is the run root
@@ -117,7 +123,12 @@ func (w *Writer) Handle(e events.Event) {
 		w.run.FinishedAt = &fin
 		w.run.Status = ev.Status
 	}
-	_ = w.flushLocked()
+	if err := w.flushLocked(); err != nil && !w.flushErrLogged {
+		w.flushErrLogged = true
+		if w.Logger != nil {
+			w.Logger.Warn("state: failed to flush state.json (subsequent errors suppressed)", "path", w.Path, "err", err)
+		}
+	}
 }
 
 func (w *Writer) stepLocked(id string) *StepState {
@@ -157,9 +168,26 @@ func (w *Writer) maskString(s string) string {
 	return w.Secrets.Mask(s)
 }
 
+// maskValue recursively walks the value, applying maskString to every
+// leaf string. Necessary because a step's outputs can be a JSON body
+// (map/slice) containing a secret — e.g. an http action returning
+// {"token": "s3cret"} — that the previous version left untouched.
 func (w *Writer) maskValue(v any) any {
-	if s, ok := v.(string); ok {
-		return w.maskString(s)
+	switch t := v.(type) {
+	case string:
+		return w.maskString(t)
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, vv := range t {
+			out[k] = w.maskValue(vv)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, vv := range t {
+			out[i] = w.maskValue(vv)
+		}
+		return out
 	}
 	return v
 }

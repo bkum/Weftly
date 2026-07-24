@@ -234,7 +234,12 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_, _ = io.Copy(w, f)
+	if _, err := io.Copy(w, f); err != nil {
+		// Headers/status already flushed — can't 500 here, but the
+		// client just got a truncated JSON. Log it so an operator
+		// grepping for "why did the SPA render nothing" has a trail.
+		s.log.Warn("state.json stream truncated", "run", id, "err", err)
+	}
 }
 
 // handleRunEvents implements the SSE stream. New subscribers get the
