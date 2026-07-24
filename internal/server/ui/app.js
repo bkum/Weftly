@@ -128,19 +128,58 @@ async function renderForm(id) {
   for (const [name, spec] of entries) {
     const wrap = document.createElement("div");
     wrap.className = "wf-field";
-    if (spec.description && spec.description.length > 60) wrap.classList.add("full");
+    // A long description or an enum picklist earns a full-row slot so
+    // the help text wraps and the select isn't squeezed.
+    if ((spec.description && spec.description.length > 60) || (spec.enum && spec.enum.length > 4)) {
+      wrap.classList.add("full");
+    }
+
     const label = document.createElement("label");
     label.className = "wf-label";
     label.textContent = name;
     if (spec.required) {
       const req = document.createElement("span");
       req.className = "wf-req";
-      req.textContent = "*";
+      req.textContent = " *";
+      req.title = "required";
       label.appendChild(req);
     }
+    if (spec.secret) {
+      const badge = document.createElement("span");
+      badge.className = "wf-badge-inline";
+      badge.textContent = "secret";
+      badge.title = "value is masked in logs and state";
+      label.appendChild(badge);
+    }
+    if (spec.type && spec.type !== "string") {
+      const badge = document.createElement("span");
+      badge.className = "wf-badge-inline dim";
+      badge.textContent = spec.type;
+      label.appendChild(badge);
+    }
     wrap.appendChild(label);
+
     let input;
-    if (spec.type === "bool") {
+    if (Array.isArray(spec.enum) && spec.enum.length > 0) {
+      // Enum → picklist. Preserve the declared order; include a
+      // blank "(default)" only when the input isn't required and no
+      // explicit default was set.
+      input = document.createElement("select");
+      input.className = "wf-select";
+      const showBlank = !spec.required && (spec.default === undefined || spec.default === null);
+      if (showBlank) {
+        const o = document.createElement("option");
+        o.value = "";
+        o.textContent = "(default)";
+        input.appendChild(o);
+      }
+      for (const v of spec.enum) {
+        const o = document.createElement("option");
+        o.value = String(v);
+        o.textContent = String(v);
+        input.appendChild(o);
+      }
+    } else if (spec.type === "bool") {
       input = document.createElement("select");
       input.className = "wf-select";
       for (const opt of ["", "true", "false"]) {
@@ -157,12 +196,24 @@ async function renderForm(id) {
       input = document.createElement("input");
       input.type = spec.secret ? "password" : "text";
       input.className = "wf-input";
+      // Show the default as a placeholder for secrets so the actual
+      // value stays out of the DOM tree (screen shares, extensions).
+      if (spec.secret && spec.default) {
+        input.placeholder = "•••••• (default)";
+      }
     }
+    // Pre-populate the default (for non-secret inputs) so the user
+    // sees exactly what will be sent. For secrets we only carry it in
+    // `values` — the input itself stays blank — so the value never
+    // renders visibly.
     if (spec.default !== undefined && spec.default !== null) {
-      input.value = String(spec.default);
       values[name] = spec.default;
+      if (!spec.secret) {
+        input.value = String(spec.default);
+      }
     }
     input.addEventListener("input", (e) => (values[name] = e.target.value));
+    input.addEventListener("change", (e) => (values[name] = e.target.value));
     wrap.appendChild(input);
     if (spec.description) {
       const help = document.createElement("div");

@@ -29,6 +29,7 @@ inputs:
   pet_type:
     description: "Pet species"
     default: "dog"
+    enum: [dog, cat, bird, lizard, hamster]
   visit_date:
     description: "Visit date (YYYY-MM-DD)"
     default: "2026-08-15"

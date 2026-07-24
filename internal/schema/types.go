@@ -21,13 +21,23 @@ const (
 	InputBool   InputType = "bool"
 )
 
-// Input is a declared parameter to a workflow.
+// Input is a declared parameter to a workflow. JSON tags mirror the
+// YAML tags in lowercase so GET /workflows/{id} exposes the same
+// field names the SPA form-renderer reads (description, required,
+// default, secret, type, enum) — without them Go's default JSON
+// marshaller would emit Go-cased field names ("Description",
+// "Required", ...) and every form-field extra would silently vanish
+// from the payload.
 type Input struct {
-	Description string    `yaml:"description"`
-	Required    bool      `yaml:"required"`
-	Default     any       `yaml:"default"`
-	Secret      bool      `yaml:"secret"`
-	Type        InputType `yaml:"type"`
+	Description string    `yaml:"description" json:"description,omitempty"`
+	Required    bool      `yaml:"required"    json:"required,omitempty"`
+	Default     any       `yaml:"default"     json:"default,omitempty"`
+	Secret      bool      `yaml:"secret"      json:"secret,omitempty"`
+	Type        InputType `yaml:"type"        json:"type,omitempty"`
+	// Enum, when non-empty, restricts the input to one of the listed
+	// values. Renders as a picklist in the SPA and is validated at
+	// input-resolution time.
+	Enum []any `yaml:"enum" json:"enum,omitempty"`
 }
 
 // HTTPDefaults holds workflow-level defaults merged into every http step.
