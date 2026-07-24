@@ -410,6 +410,17 @@ async function renderRun(runID) {
         s.glyph.innerHTML = glyphs[ev.Status] || "•";
         const dur = ev.Duration ? Math.round(ev.Duration / 1e6) + "ms" : "";
         s.meta.textContent = (ev.Resumed ? "(resumed) " : "") + ev.Status + (dur ? " · " + dur : "");
+        // If the step failed, surface the action's error inline in the
+        // logs pane in red. Without this the SPA silently drops
+        // ev.Err — the operator sees 'failed · 1ms' but can't tell
+        // why (e.g. 'unsupported protocol scheme' from a bad URL).
+        if (ev.Err) {
+          s.logs.hidden = false;
+          const line = document.createElement("div");
+          line.className = "stderr";
+          line.textContent = "✗ " + ev.Err;
+          s.logs.appendChild(line);
+        }
         break;
       }
       case "SummaryEmitted": {

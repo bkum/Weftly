@@ -4,7 +4,10 @@
 // legitimate way to produce user-visible output.
 package events
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Event is the closed set of things that can happen during a run.
 // Callers switch on the concrete type.
@@ -109,3 +112,31 @@ func (StepRetry) isEvent()        {}
 func (SummaryEmitted) isEvent()   {}
 func (ArtifactUploaded) isEvent() {}
 func (RunFinished) isEvent()      {}
+
+// MarshalJSON on the two events with an `Err error` field renders it
+// as the underlying error's Error() string instead of Go's default
+// (which would marshal the interface as `{}`, hiding the real cause
+// from the SSE client and the SPA — a common trap for "why can't I
+// see why my step failed").
+func (e StepFinished) MarshalJSON() ([]byte, error) {
+	type alias StepFinished
+	return json.Marshal(struct {
+		alias
+		Err string `json:"Err,omitempty"`
+	}{alias(e), errString(e.Err)})
+}
+
+func (e StepRetry) MarshalJSON() ([]byte, error) {
+	type alias StepRetry
+	return json.Marshal(struct {
+		alias
+		Err string `json:"Err,omitempty"`
+	}{alias(e), errString(e.Err)})
+}
+
+func errString(e error) string {
+	if e == nil {
+		return ""
+	}
+	return e.Error()
+}
