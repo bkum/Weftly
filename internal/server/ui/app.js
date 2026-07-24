@@ -435,6 +435,12 @@ async function renderRun(runID) {
         badge.textContent = ev.Status;
         badge.className = "wf-badge " + ev.Status;
         cancelBtn.hidden = true;
+        // Close the EventSource so the browser stops reconnecting
+        // every ~3s to a completed run — otherwise the server keeps
+        // getting GET /runs/{id}/events forever from an idle tab.
+        // Delay slightly so any straggler frames (heartbeat, close
+        // frame) drain first.
+        setTimeout(() => src.close(), 250);
         break;
     }
   };
@@ -448,7 +454,13 @@ async function renderRun(runID) {
     try { handle(JSON.parse(ev.data)); } catch (_) {}
   };
   src.onopen = () => { conn.hidden = true; };
-  src.onerror = () => { conn.hidden = false; };
+  src.onerror = () => {
+    // A completed run's server-closed stream also fires onerror; if
+    // we've already recorded a terminal status, don't show the
+    // "Reconnecting…" banner — the source is about to be closed.
+    if (badge.textContent && badge.textContent !== "running") return;
+    conn.hidden = false;
+  };
 }
 
 function basename(p) {
