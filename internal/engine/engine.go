@@ -837,9 +837,34 @@ func resolveScopeInputs(scope *ir.Scope, rc runCtx, stepsSnap map[string]expr.St
 		return rc.Inputs
 	}
 	parentEnv := envForScope(scope.Parent, rc, stepsSnap)
+	// Defaults are authored in the CHILD's YAML and commonly reference
+	// `workflow.dir` so a self-contained library resolves its own
+	// bundled assets no matter where it's called from. Interpolate
+	// literal defaults through a minimal child-scope env that has
+	// workflow.dir set from scope.Dir. We deliberately don't expose
+	// other inputs to defaults to sidestep the chicken-and-egg of
+	// input-order dependencies inside one workflow file.
+	defaultEnv := expr.Env{
+		Inputs:      map[string]any{},
+		Steps:       map[string]expr.StepView{},
+		Env:         rc.Env,
+		Secrets:     map[string]string{},
+		Run:         expr.RunMeta{ID: rc.RunID, Workspace: rc.Workspace.StepsDir},
+		WorkflowDir: scope.Dir,
+	}
 	out := make(map[string]any, len(scope.Inputs))
 	for name, b := range scope.Inputs {
 		if !b.IsExpr {
+			// Literal default: interpolate ${{ }} spans through the
+			// child's own workflow.dir so `default: "${{ workflow.dir
+			// }}/x"` behaves as authored. Non-string defaults or those
+			// without any span pass through untouched.
+			if s, ok := b.Literal.(string); ok && strings.Contains(s, "${{") {
+				if v, err := rc.Expr.Interpolate(s, defaultEnv); err == nil {
+					out[name] = v
+					continue
+				}
+			}
 			out[name] = b.Literal
 			continue
 		}
