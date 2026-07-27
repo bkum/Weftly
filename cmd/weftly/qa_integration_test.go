@@ -82,9 +82,15 @@ func repoRoot(t *testing.T) string {
 // test failure — several scenarios expect it.
 func runWeftly(t *testing.T, args ...string) (string, int) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Resolve the binary path OUTSIDE the timeout window. The first
+	// call compiles cmd/weftly, which on a cold macOS runner can take
+	// long enough on its own to blow a 30s budget — the failing signal
+	// then looked like `weftly version` hanging, when what really
+	// happened was `go build` swallowing the whole timeout.
+	bin := weftlyBinary(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, weftlyBinary(t), args...)
+	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = repoRoot(t)
 	out, err := cmd.CombinedOutput()
 	code := 0
