@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	// register built-in actions
@@ -45,17 +46,36 @@ func TestFlagshipWorkflowE2E(t *testing.T) {
 	baseDir := t.TempDir()
 
 	bus := events.NewBus()
-	var logs []string
+	// Bus.Publish fans out synchronously per subscriber, but multiple
+	// step goroutines can Publish concurrently (parallel scheduler) so
+	// the callback below can be invoked from different goroutines at
+	// the same time. Guard the shared slice.
+	var (
+		logsMu sync.Mutex
+		logs   []string
+	)
+	appendLog := func(s string) {
+		logsMu.Lock()
+		logs = append(logs, s)
+		logsMu.Unlock()
+	}
+	snapshotLogs := func() []string {
+		logsMu.Lock()
+		defer logsMu.Unlock()
+		out := make([]string, len(logs))
+		copy(out, logs)
+		return out
+	}
 	bus.Subscribe(func(e events.Event) {
 		switch v := e.(type) {
 		case events.StepLog:
-			logs = append(logs, string(v.Stream)+": "+v.Line)
+			appendLog(string(v.Stream) + ": " + v.Line)
 		case events.StepFinished:
 			msg := "step " + v.StepID + " " + string(v.Status)
 			if v.Err != nil {
 				msg += " err=" + v.Err.Error()
 			}
-			logs = append(logs, msg)
+			appendLog(msg)
 		}
 	})
 
@@ -69,14 +89,14 @@ func TestFlagshipWorkflowE2E(t *testing.T) {
 		Bus: bus,
 	})
 	if err != nil {
-		t.Fatalf("run: %v\nlogs:\n%s", err, strings.Join(logs, "\n"))
+		t.Fatalf("run: %v\nlogs:\n%s", err, strings.Join(snapshotLogs(), "\n"))
 	}
 	if res.Status != events.Success {
-		t.Fatalf("expected success, got %s\nlogs:\n%s", res.Status, strings.Join(logs, "\n"))
+		t.Fatalf("expected success, got %s\nlogs:\n%s", res.Status, strings.Join(snapshotLogs(), "\n"))
 	}
 
 	// The api_key must never appear in any log line.
-	for _, l := range logs {
+	for _, l := range snapshotLogs() {
 		if strings.Contains(l, apiKey) {
 			t.Fatalf("secret api_key leaked into log: %q", l)
 		}
