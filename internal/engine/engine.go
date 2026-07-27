@@ -30,6 +30,7 @@ import (
 	"github.com/bkum/weftly/internal/tracing"
 	"github.com/bkum/weftly/internal/workspace"
 	"go.opentelemetry.io/otel/attribute"
+	"gopkg.in/yaml.v3"
 )
 
 // Options bundles run-time knobs.
@@ -61,6 +62,14 @@ type Options struct {
 	// read-only mount) is surfaced instead of silently swallowed.
 	// Server mode wires the server's logger here; CLI leaves it nil.
 	Logger *slog.Logger
+
+	// CatalogueRoot confines step-level `include:` resolution: an
+	// included path that resolves outside this directory is a
+	// compile-time error. Empty in CLI mode where the trust boundary
+	// is already the operator's filesystem; server mode passes its
+	// --dir here so a workflow can't reach files the operator hasn't
+	// staged into the catalogue.
+	CatalogueRoot string
 }
 
 // Result summarises a completed run.
@@ -167,7 +176,10 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 		baseEnv[k] = v
 	}
 
-	graph := compile.Compile(wf)
+	graph, err := compile.CompileWithOptions(wf, compile.Options{CatalogueRoot: opts.CatalogueRoot})
+	if err != nil {
+		return Result{}, fmt.Errorf("compile: %w", err)
+	}
 	ev := expr.New()
 	// stepViews is read by runStep to build the expr env; writes are
 	// serialised by stepMu so parallel steps don't race.
@@ -358,9 +370,25 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 	}
 	rc.StepMu.Unlock()
 
+	// Scope-remapped views. For top-level steps these are the run-wide
+	// values. For steps expanded under an include (node.Scope != nil),
+	// inputs.* resolves through the child's binding table and steps.*
+	// through the child's local id → qualified id mapping — so the
+	// included file's expressions match what the file was authored with,
+	// not the caller's namespace.
+	scopedInputs := rc.Inputs
+	scopedSteps := stepsSnap
+	workflowDir := filepath.Dir(rc.Workflow.Path)
+	if node.Scope != nil {
+		scopedInputs = resolveScopeInputs(node.Scope, rc, stepsSnap)
+		scopedSteps = resolveScopeSteps(node.Scope, stepsSnap)
+		if node.Scope.Dir != "" {
+			workflowDir = node.Scope.Dir
+		}
+	}
 	envForExpr := expr.Env{
-		Inputs:  rc.Inputs,
-		Steps:   stepsSnap,
+		Inputs:  scopedInputs,
+		Steps:   scopedSteps,
 		Env:     rc.Env,
 		Secrets: map[string]string{}, // secrets exposed as-is to expressions; renderer masks output
 		Run: expr.RunMeta{
@@ -369,7 +397,8 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 			Status:    rc.CleanupStatus,    // empty during main graph, set during cleanup
 			Cancelled: rc.CleanupCancelled, // ditto
 		},
-		Each: rc.ForEachIter, // nil outside a for-each iteration
+		Each:        rc.ForEachIter, // nil outside a for-each iteration
+		WorkflowDir: workflowDir,
 	}
 	// Give expressions access to secrets by name too.
 	for _, name := range secretNames(rc.Workflow) {
@@ -429,11 +458,15 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 		shell = node.Shell
 	}
 
+	var actionCfg *yaml.Node
+	if node.Config != nil {
+		actionCfg = node.Config.ActionNode
+	}
 	sc := &actions.StepContext{
 		StepID:        node.ID,
 		StepName:      node.Name,
 		Action:        node.Action,
-		Config:        node.Config.ActionNode,
+		Config:        actionCfg,
 		Inputs:        rc.Inputs,
 		Steps:         rc.Steps,
 		Env:           resolvedEnv,
@@ -788,3 +821,85 @@ func retryDelay(r *schema.Retry, attempt int) time.Duration {
 		return r.Delay
 	}
 }
+
+// --- step-level include: scope-aware expression resolution -----------
+
+// resolveScopeInputs realises the scope's Binding table into a
+// concrete inputs map. Expression-typed bindings are evaluated against
+// the parent scope's env — recursively, so a value threaded down N
+// includes chains through N Interpolates against N-1 parents.
+//
+// A bad expression is not fatal: the input is bound to a stringified
+// error marker so the caller sees the failure in the step that
+// consumes the input, with the original expression source preserved.
+func resolveScopeInputs(scope *ir.Scope, rc runCtx, stepsSnap map[string]expr.StepView) map[string]any {
+	if scope == nil {
+		return rc.Inputs
+	}
+	parentEnv := envForScope(scope.Parent, rc, stepsSnap)
+	out := make(map[string]any, len(scope.Inputs))
+	for name, b := range scope.Inputs {
+		if !b.IsExpr {
+			out[name] = b.Literal
+			continue
+		}
+		v, err := rc.Expr.Interpolate(b.Expr, parentEnv)
+		if err != nil {
+			out[name] = fmt.Sprintf("<expr-error: %s: %v>", b.Expr, err)
+			continue
+		}
+		out[name] = v
+	}
+	return out
+}
+
+// resolveScopeSteps builds the child's local view of `steps.*`. Child
+// sibling ids resolve through the scope's local→qualified map. Top-
+// level (unqualified) step ids remain visible as a fallthrough — that
+// preserves parity with unscoped code that references a globally-
+// available prerequisite. A child cannot reach the PARENT scope's step
+// ids because they aren't in the child's map and (unless authored
+// unqualified at the top level) don't exist in stepsSnap under a bare
+// name.
+func resolveScopeSteps(scope *ir.Scope, stepsSnap map[string]expr.StepView) map[string]expr.StepView {
+	if scope == nil {
+		return stepsSnap
+	}
+	out := make(map[string]expr.StepView, len(scope.StepIDs)+len(stepsSnap))
+	for local, qualified := range scope.StepIDs {
+		if v, ok := stepsSnap[qualified]; ok {
+			out[local] = v
+		}
+	}
+	for id, v := range stepsSnap {
+		if _, taken := out[id]; taken {
+			continue
+		}
+		if !strings.Contains(id, ".") {
+			out[id] = v
+		}
+	}
+	return out
+}
+
+// envForScope produces a full expr.Env at the specified scope. Used
+// recursively during input-binding evaluation.
+func envForScope(scope *ir.Scope, rc runCtx, stepsSnap map[string]expr.StepView) expr.Env {
+	dir := filepath.Dir(rc.Workflow.Path)
+	if scope != nil && scope.Dir != "" {
+		dir = scope.Dir
+	}
+	return expr.Env{
+		Inputs:      resolveScopeInputs(scope, rc, stepsSnap),
+		Steps:       resolveScopeSteps(scope, stepsSnap),
+		Env:         rc.Env,
+		Secrets:     map[string]string{},
+		Run:         expr.RunMeta{ID: rc.RunID, Workspace: rc.Workspace.StepsDir},
+		WorkflowDir: dir,
+	}
+}
+
+// StepScope is a local alias so this file doesn't have to reach into
+// internal/ir on every call site. Kept internal — this is a wiring
+// convenience, not part of a stable API.
+type StepScope = ir.Scope

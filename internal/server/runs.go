@@ -107,16 +107,17 @@ func (r *runRecord) subscribe() ([]events.Event, <-chan events.Event) {
 }
 
 type runManager struct {
-	baseDir string
-	log     *slog.Logger
-	store   actions.RemoteArtifactStore // may be nil
+	baseDir       string
+	catalogueRoot string // absolute; confines step-level include:
+	log           *slog.Logger
+	store         actions.RemoteArtifactStore // may be nil
 
 	mu   sync.RWMutex
 	runs map[string]*runRecord
 }
 
-func newRunManager(baseDir string, log *slog.Logger, store actions.RemoteArtifactStore) *runManager {
-	return &runManager{baseDir: baseDir, log: log, store: store, runs: map[string]*runRecord{}}
+func newRunManager(baseDir, catalogueRoot string, log *slog.Logger, store actions.RemoteArtifactStore) *runManager {
+	return &runManager{baseDir: baseDir, catalogueRoot: catalogueRoot, log: log, store: store, runs: map[string]*runRecord{}}
 }
 
 // start dispatches a workflow into a fresh run and returns its record.
@@ -156,6 +157,7 @@ func (m *runManager) start(_ context.Context, wfID string, wf *schema.Workflow, 
 		// when it pivots to GET /runs/:id.
 		_, err := engine.Run(runCtx, wf, engine.Options{
 			BaseDir:         m.baseDir,
+			CatalogueRoot:   m.catalogueRoot,
 			Inputs:          inputs,
 			Bus:             bus,
 			ArtifactStore:   m.store,

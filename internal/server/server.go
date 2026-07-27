@@ -129,7 +129,7 @@ func New(cfg Config) (*Server, error) {
 		cfg:   cfg,
 		log:   cfg.Logger,
 		cat:   cat,
-		runs:  newRunManager(cfg.RunsDir, cfg.Logger, store),
+		runs:  newRunManager(cfg.RunsDir, cfg.CatalogueDir, cfg.Logger, store),
 		auth:  auth,
 		store: store,
 		audit: audit,

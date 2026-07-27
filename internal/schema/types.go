@@ -66,7 +66,16 @@ type Workflow struct {
 	// into this workflow at Load time. Cycles are detected. Included
 	// name / inputs / description / requires are ignored — includes are
 	// step libraries, not full workflows.
+	//
+	// This is the top-level "prelude" include (Phase 4). The step-level
+	// `include:` (with `with:`) is a different feature — see Step.Include.
 	Include []string `yaml:"include"`
+	// Outputs is the top-level output contract of the workflow, evaluated
+	// in the workflow's own scope after its steps have run. When this
+	// workflow is used as a step-level include, the parent references
+	// `steps.<include-id>.outputs.<name>` — undeclared names are a
+	// compile-time error.
+	Outputs map[string]string `yaml:"outputs"`
 	// Cleanup runs sequentially after the main graph completes,
 	// regardless of the run's outcome. Cleanup steps get success() /
 	// failure() / cancelled() populated from the run's aggregate
@@ -76,10 +85,20 @@ type Workflow struct {
 	// Source retains the parsed YAML root node for line-number-aware error
 	// reporting. Nil after a bare struct construction (e.g. tests).
 	Source *yaml.Node `yaml:"-"`
+	// Path is the absolute filesystem path this workflow was Load()ed
+	// from, or empty for bare struct construction / streaming Parse().
+	// Used by the compiler to resolve relative step-level `include:`
+	// paths against the including file's directory (not cwd), and to
+	// power the `workflow.dir` expression namespace.
+	Path string `yaml:"-"`
 }
 
 // The set of action keys recognised on a step. Exactly one must be present.
-var actionKeys = []string{"run", "http", "template", "prompt", "assert", "summary", "upload", "wait", "parse", "notify"}
+// `include` is a special key handled by the compiler (not the action
+// registry): steps with `include:` are expanded into the child workflow's
+// steps at compile time, so by the time the scheduler sees the IR, no
+// StepNode carries Action="include".
+var actionKeys = []string{"run", "http", "template", "prompt", "assert", "summary", "upload", "wait", "parse", "notify", "include"}
 
 // Retry declares an automatic-retry policy for a step. Attempts is the
 // total number of tries (including the first), so `attempts: 3` means
@@ -111,6 +130,14 @@ type Step struct {
 	Retry           *Retry            `yaml:"retry"`     // opt-in retry policy on failure/timeout
 	ForEach         string            `yaml:"for-each"`  // expression → list; runs step N times
 	Outputs         map[string]string `yaml:"outputs"`
+
+	// Include, when non-empty, marks this step as a step-level workflow
+	// include. The compiler expands the referenced file's steps in place
+	// under this step's id, wiring the parent-supplied `With:` map into
+	// the child's inputs and exposing the child's top-level `outputs:`
+	// contract at `steps.<this-id>.outputs.*`.
+	Include string            `yaml:"include"`
+	With    map[string]string `yaml:"with"`
 
 	// Populated by custom unmarshal. ActionType is one of actionKeys.
 	// ActionNode holds the raw YAML for that action's config so per-action
