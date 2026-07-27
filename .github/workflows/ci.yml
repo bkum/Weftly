@@ -90,3 +90,50 @@ jobs:
           name: weftly-linux-amd64
           path: weftly
           if-no-files-found: error
+
+  release-archive:
+    name: release archive (goreleaser snapshot)
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    # Every push that could affect release plumbing gets a full
+    # snapshot build, extracted, and smoke-tested. This exists because
+    # a silent `no files matched glob=workflows/**/*` in goreleaser
+    # shipped an empty tarball to users under a config that looked
+    # correct — the regression only surfaced on `tar xzf`. Now CI
+    # inspects the tarball and runs the shipped binary against the
+    # shipped hello workflow so the same class of bug can't ship.
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0    # goreleaser reads tags for version stamping
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: release --snapshot --clean --skip=publish --skip=sign --skip=validate --skip=announce --skip=chocolatey --skip=nix --skip=ko --skip=sbom
+      - name: archive contains workflows/ + examples/
+        run: |
+          set -euxo pipefail
+          tarball=$(ls dist/weftly_*_linux_amd64.tar.gz | head -n1)
+          contents=$(tar tzf "$tarball")
+          echo "$contents"
+          for want in weftly workflows/hello.yml workflows/petclinic-onboarding.yml examples/schedules.example.yaml examples/weftly.example.yaml README.md LICENSE; do
+            if ! echo "$contents" | grep -qx "$want"; then
+              echo "::error::release tarball is missing $want"
+              exit 1
+            fi
+          done
+      - name: shipped binary runs the shipped hello workflow
+        run: |
+          set -euxo pipefail
+          tarball=$(ls dist/weftly_*_linux_amd64.tar.gz | head -n1)
+          extract=$(mktemp -d)
+          tar xzf "$tarball" -C "$extract"
+          cd "$extract"
+          ./weftly version
+          ./weftly validate workflows/hello.yml
+          ./weftly run workflows/hello.yml --no-color --input name=ci

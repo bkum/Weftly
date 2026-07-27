@@ -46,11 +46,19 @@ archives:
       # extracting the tarball. The hello workflow needs no external
       # services; the petclinic one demonstrates the full REST + assert
       # + upload path against a running PetClinic.
-      - workflows/**/*
+      #
+      # We use the structured src/dst form because goreleaser v2's bare
+      # string globs go through zglob, which does not walk into
+      # directories from a plain path — `workflows/**/*` silently
+      # matched nothing in previous releases. src+dst force a directory
+      # walk and keep the layout inside the tarball.
+      - src: workflows
+        dst: workflows
       # examples/ carries operator config templates (schedules.yaml,
       # weftly.yaml RBAC file) — reference material, not runnable
       # workflows.
-      - examples/**/*
+      - src: examples
+        dst: examples
 
 checksum:
   name_template: 'checksums.txt'
