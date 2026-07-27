@@ -9,6 +9,7 @@ import (
 	// register built-in actions via their init() side effects
 	_ "github.com/bkum/weftly/internal/actions"
 
+	"github.com/bkum/weftly/internal/compile"
 	"github.com/bkum/weftly/internal/engine"
 	"github.com/bkum/weftly/internal/events"
 	"github.com/bkum/weftly/internal/render/tty"
@@ -68,13 +69,27 @@ func newRunCmd() *cobra.Command {
 			}
 
 			if dryRun {
+				// Print the expanded plan (post-include). Step-level
+				// `include:` is composition, so the interesting plan is
+				// the one the scheduler will actually walk — qualified
+				// ids, one line per node, with the hidden bookkeeping
+				// nodes suppressed unless the operator asks for them.
+				g, err := compile.CompileWithOptions(wf, compile.Options{})
+				if err != nil {
+					return err
+				}
 				fmt.Fprintf(cmd.OutOrStdout(), "workflow: %s\nsteps:\n", wf.Name)
-				for i, s := range wf.Steps {
-					name := s.Name
-					if name == "" {
-						name = s.ID
+				i := 0
+				for _, n := range g.Order {
+					if n.Hidden {
+						continue
 					}
-					fmt.Fprintf(cmd.OutOrStdout(), "  %d. [%s] %s\n", i+1, s.ActionType, name)
+					i++
+					name := n.Name
+					if name == "" {
+						name = n.ID
+					}
+					fmt.Fprintf(cmd.OutOrStdout(), "  %d. [%s] %s (%s)\n", i, n.Action, name, n.ID)
 				}
 				return nil
 			}

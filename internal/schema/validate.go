@@ -2,6 +2,7 @@ package schema
 
 import (
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -110,6 +111,44 @@ func validateSteps(wf *Workflow) Errors {
 		// script — no other action would know what to do with an image.
 		if s.Container != "" && s.ActionType != "run" {
 			errs = append(errs, Error{Line: line, Path: path + ".container", Message: "container: is only valid on a run step"})
+		}
+		// Step-level `include:` (workflow composition) rejects certain
+		// modifiers because they'd be ambiguous or under-specified across
+		// a group of expanded child steps (see include spec §3.2).
+		if s.ActionType == "include" {
+			if len(s.Env) > 0 {
+				errs = append(errs, Error{Line: line, Path: path + ".env", Message: "env: is not allowed on an include step — pass values through with:"})
+			}
+			if s.Timeout != 0 {
+				errs = append(errs, Error{Line: line, Path: path + ".timeout", Message: "timeout: is not allowed on an include step (ambiguous: per-child or total?)"})
+			}
+			if s.Retry != nil {
+				errs = append(errs, Error{Line: line, Path: path + ".retry", Message: "retry: is not allowed on an include step (retry the individual step inside the child instead)"})
+			}
+			if s.ForEach != "" {
+				errs = append(errs, Error{Line: line, Path: path + ".for-each", Message: "for-each: is not allowed on an include step"})
+			}
+			if s.ID == "" {
+				errs = append(errs, Error{Line: line, Path: path, Message: "include step requires an id (child steps are qualified under it: <id>.<child-id>)"})
+			}
+			if strings.Contains(s.ID, ".") {
+				errs = append(errs, Error{Line: line, Path: path + ".id", Message: "id must not contain '.' (reserved for include step qualification)"})
+			}
+			if strings.TrimSpace(s.Include) == "" {
+				errs = append(errs, Error{Line: line, Path: path + ".include", Message: "include: path is required"})
+			}
+			if filepath.IsAbs(s.Include) {
+				errs = append(errs, Error{Line: line, Path: path + ".include", Message: "include: absolute paths are not allowed (use a path relative to this workflow)"})
+			}
+			for _, prefix := range []string{"http://", "https://"} {
+				if strings.HasPrefix(strings.ToLower(s.Include), prefix) {
+					errs = append(errs, Error{Line: line, Path: path + ".include", Message: "include: URLs are not allowed"})
+					break
+				}
+			}
+		}
+		if s.ActionType != "include" && strings.Contains(s.ID, ".") {
+			errs = append(errs, Error{Line: line, Path: path + ".id", Message: "id must not contain '.' (reserved for include step qualification)"})
 		}
 		if s.Retry != nil {
 			if s.Retry.Attempts < 2 {

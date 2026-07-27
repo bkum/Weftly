@@ -9,15 +9,25 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Load reads and parses a workflow file, expanding any `include:` list
-// recursively (cycle-detected, paths resolved relative to the including
-// file). No validation.
+// Load reads and parses a workflow file, expanding any top-level
+// `include:` list recursively (cycle-detected, paths resolved relative
+// to the including file). No validation.
+//
+// The returned Workflow has Path set to the absolute filesystem path of
+// the loaded file so downstream compilers can resolve step-level
+// `include:` paths against the correct directory and render
+// `workflow.dir` in expressions.
 func Load(path string) (*Workflow, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
 	}
-	return loadWithVisited(abs, map[string]bool{})
+	wf, err := loadWithVisited(abs, map[string]bool{})
+	if err != nil {
+		return nil, err
+	}
+	wf.Path = abs
+	return wf, nil
 }
 
 // loadWithVisited is the recursive helper for include expansion. The

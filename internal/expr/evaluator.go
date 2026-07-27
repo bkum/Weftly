@@ -66,6 +66,12 @@ type Env struct {
 	Run      RunMeta
 	Response any
 	Each     *EachContext
+	// WorkflowDir is the absolute directory of the YAML file that
+	// authored the step being evaluated. Exposed as `workflow.dir` so
+	// relative defaults inside an included library (e.g.
+	// `default: "${{ workflow.dir }}/../profiles.json"`) resolve
+	// against the file, not the run workspace.
+	WorkflowDir string
 }
 
 // Evaluator is safe for concurrent use once constructed.
@@ -240,6 +246,9 @@ func (e *Evaluator) envMap(env Env) map[string]any {
 			"workspace": env.Run.Workspace,
 			"status":    env.Run.Status,
 			"cancelled": env.Run.Cancelled,
+		},
+		"workflow": map[string]any{
+			"dir": env.WorkflowDir,
 		},
 	}
 	if env.Response != nil {
