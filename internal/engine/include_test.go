@@ -240,6 +240,64 @@ steps:
 	}
 }
 
+// TestIncludeCatalogueRootWidenedByProjectRoot mirrors the real user
+// layout: workflows/ and lib/ are siblings under a project root. The
+// server operator points --include-root at the project root so
+// `workflows/main.yml` can `include: ../lib/shared.yml` while --dir
+// (the runnable catalogue) stays scoped to workflows/.
+func TestIncludeCatalogueRootWidenedByProjectRoot(t *testing.T) {
+	root := t.TempDir()
+	workflowsDir := filepath.Join(root, "workflows")
+	libDir := filepath.Join(root, "lib")
+	if err := os.MkdirAll(workflowsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(libDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(libDir, "shared.yml"), []byte(`
+name: shared
+steps:
+  - id: noop
+    run: echo hi
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	main := filepath.Join(workflowsDir, "main.yml")
+	if err := os.WriteFile(main, []byte(`
+name: main
+steps:
+  - id: sub
+    include: ../lib/shared.yml
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wf, _ := schema.Load(main)
+	// With CatalogueRoot=workflowsDir, the include should be rejected
+	// because ../lib escapes it.
+	_, err := engine.Run(context.Background(), wf, engine.Options{
+		BaseDir:       t.TempDir(),
+		Bus:           events.NewBus(),
+		CatalogueRoot: workflowsDir,
+	})
+	if err == nil || !strings.Contains(err.Error(), "escapes catalogue root") {
+		t.Fatalf("expected confinement error at narrow root, got %v", err)
+	}
+	// With CatalogueRoot=root (the project root), the include resolves
+	// under the widened boundary and the run succeeds.
+	res, err := engine.Run(context.Background(), wf, engine.Options{
+		BaseDir:       t.TempDir(),
+		Bus:           events.NewBus(),
+		CatalogueRoot: root,
+	})
+	if err != nil {
+		t.Fatalf("widened root: %v", err)
+	}
+	if res.Status != events.Success {
+		t.Fatalf("widened root: want success, got %s", res.Status)
+	}
+}
+
 func TestIncludeSecretInputMasked(t *testing.T) {
 	callee := `
 name: lib

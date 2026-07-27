@@ -350,7 +350,7 @@ func resolveIncludePath(dir, rel, root string) (string, error) {
 	if root != "" {
 		rrel, err := filepath.Rel(root, abs)
 		if err != nil || strings.HasPrefix(rrel, "..") || rrel == ".." {
-			return "", fmt.Errorf("include escapes catalogue root %s (resolved to %s)", root, abs)
+			return "", fmt.Errorf("include escapes catalogue root %s (resolved to %s); if this is legitimate project layout, widen the boundary with `weftly server --include-root <project-root>`", root, abs)
 		}
 	}
 	return abs, nil
