@@ -16,6 +16,7 @@ func newServerCmd() *cobra.Command {
 	var (
 		addr          string
 		dir           string
+		includeRoot   string
 		runsDir       string
 		token         string
 		authFile      string
@@ -58,6 +59,7 @@ func newServerCmd() *cobra.Command {
 			srv, err := server.New(server.Config{
 				Addr:            addr,
 				CatalogueDir:    dir,
+				IncludeRoot:     includeRoot,
 				RunsDir:         runsDir,
 				Token:           token,
 				AuthFile:        authFile,
@@ -77,6 +79,7 @@ func newServerCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&addr, "addr", ":8080", "listen address")
 	cmd.Flags().StringVar(&dir, "dir", "./workflows", "catalogue directory (only these workflows can be run)")
+	cmd.Flags().StringVar(&includeRoot, "include-root", "", "widen step-level `include:` confinement to this directory (typically the project root above --dir); defaults to --dir when unset")
 	cmd.Flags().StringVar(&runsDir, "runs-dir", "./.weftly", "parent directory for per-run state")
 	cmd.Flags().StringVar(&token, "token", "", "single bearer token (or WEFTLY_TOKEN env); ignored when --auth-file is set")
 	cmd.Flags().StringVar(&authFile, "auth-file", "", "YAML file with multi-token → role → workflow allowlist (RBAC)")

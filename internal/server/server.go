@@ -29,6 +29,19 @@ type Config struct {
 	// CatalogueDir is a directory scanned for *.yml / *.yaml workflow
 	// files. Nothing outside it is runnable.
 	CatalogueDir string
+	// IncludeRoot, when set, widens the confinement boundary for
+	// step-level `include:` — a workflow in CatalogueDir may include
+	// files from anywhere under this directory (which typically sits
+	// ABOVE CatalogueDir, so `workflows/main.yml` can include
+	// `../lib/shared.yml`).
+	//
+	// When empty, CatalogueDir itself is the include root (the strict
+	// default: everything a workflow can reach must live inside the
+	// runnable catalogue). Operators who split their layout into
+	// sibling directories under one project root set this to that
+	// project root so cross-directory includes work without loosening
+	// the catalogue's own guarantee (which workflows are runnable).
+	IncludeRoot string
 	// RunsDir is the parent under which per-run state lives (matches the
 	// CLI's ./.weftly convention).
 	RunsDir string
@@ -129,7 +142,7 @@ func New(cfg Config) (*Server, error) {
 		cfg:   cfg,
 		log:   cfg.Logger,
 		cat:   cat,
-		runs:  newRunManager(cfg.RunsDir, cfg.CatalogueDir, cfg.Logger, store),
+		runs:  newRunManager(cfg.RunsDir, includeRootFor(cfg), cfg.Logger, store),
 		auth:  auth,
 		store: store,
 		audit: audit,
@@ -319,4 +332,15 @@ func (s *Server) Addr() string {
 		return s.cfg.Addr
 	}
 	return s.srv.Addr
+}
+
+// includeRootFor returns the directory step-level `include:` resolution
+// must not escape. IncludeRoot wins when set (operator opted into a
+// broader project layout); otherwise CatalogueDir is used so the
+// default preserves the "workflows are self-contained" guarantee.
+func includeRootFor(cfg Config) string {
+	if cfg.IncludeRoot != "" {
+		return cfg.IncludeRoot
+	}
+	return cfg.CatalogueDir
 }
