@@ -298,6 +298,66 @@ steps:
 	}
 }
 
+// TestIncludeDefaultResolvesWorkflowDir exercises the common pattern
+// where a library workflow's input default references
+// `${{ workflow.dir }}/asset.json` so the library ships with its own
+// bundled resources and callers don't need to know the internal
+// layout. Without interpolation of literal defaults, the shell just
+// gets the raw "${{ workflow.dir }}" and can't open the file — the
+// exact failure the user's EDI toolkit hit.
+func TestIncludeDefaultResolvesWorkflowDir(t *testing.T) {
+	dir := t.TempDir()
+	// Put an asset file next to the library.
+	if err := os.WriteFile(filepath.Join(dir, "asset.txt"), []byte("hello-from-asset\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	callee := `
+name: lib
+inputs:
+  asset_path:
+    description: bundled asset
+    default: "${{ workflow.dir }}/asset.txt"
+steps:
+  - id: readit
+    run: |
+      cat "$A"
+      echo "size=$(wc -c < $A | tr -d ' ')" >> "$WEFTLY_OUTPUT"
+    env:
+      A: "${{ inputs.asset_path }}"
+outputs:
+  size: "${{ steps.readit.outputs.size }}"
+`
+	caller := `
+name: caller
+steps:
+  - id: sub
+    include: lib.yml
+`
+	// Write directly into dir so the child's workflow.dir == dir and
+	// the default's ${{ workflow.dir }}/asset.txt resolves.
+	if err := os.WriteFile(filepath.Join(dir, "lib.yml"), []byte(callee), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	main := filepath.Join(dir, "main.yml")
+	if err := os.WriteFile(main, []byte(caller), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wf, err := schema.Load(main)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := engine.Run(context.Background(), wf, engine.Options{
+		BaseDir: t.TempDir(),
+		Bus:     events.NewBus(),
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Status != events.Success {
+		t.Fatalf("want success, got %s", res.Status)
+	}
+}
+
 func TestIncludeSecretInputMasked(t *testing.T) {
 	callee := `
 name: lib
