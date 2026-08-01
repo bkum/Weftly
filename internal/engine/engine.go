@@ -379,12 +379,23 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 	scopedInputs := rc.Inputs
 	scopedSteps := stepsSnap
 	workflowDir := filepath.Dir(rc.Workflow.Path)
+	// Working directory: top-level steps share the run workspace;
+	// steps inside an include get their scope's own subdirectory so two
+	// uses of the same fragment can't overwrite each other's files.
+	stepWorkdir := rc.Workspace.StepsDir
+	scopePrefix := ""
 	if node.Scope != nil {
 		scopedInputs = resolveScopeInputs(node.Scope, rc, stepsSnap)
 		scopedSteps = resolveScopeSteps(node.Scope, stepsSnap)
 		if node.Scope.Dir != "" {
 			workflowDir = node.Scope.Dir
 		}
+		scopePrefix = node.Scope.Prefix
+		d, err := rc.Workspace.ScopeDir(scopePrefix)
+		if err != nil {
+			return abortStep(rc, node, fmt.Errorf("scope workspace: %w", err))
+		}
+		stepWorkdir = d
 	}
 	envForExpr := expr.Env{
 		Inputs:  scopedInputs,
@@ -397,8 +408,9 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 			Status:    rc.CleanupStatus,    // empty during main graph, set during cleanup
 			Cancelled: rc.CleanupCancelled, // ditto
 		},
-		Each:        rc.ForEachIter, // nil outside a for-each iteration
-		WorkflowDir: workflowDir,
+		Each:         rc.ForEachIter, // nil outside a for-each iteration
+		WorkflowDir:  workflowDir,
+		WorkspaceDir: stepWorkdir,
 	}
 	// Give expressions access to secrets by name too.
 	for _, name := range secretNames(rc.Workflow) {
@@ -471,7 +483,8 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 		Steps:         rc.Steps,
 		Env:           resolvedEnv,
 		Secrets:       rc.Secrets,
-		Workdir:       rc.Workspace.StepsDir,
+		Workdir:       stepWorkdir,
+		ScopePrefix:   scopePrefix,
 		ArtifactsDir:  rc.Workspace.ArtifactsDir,
 		ExprEnv:       envForExpr,
 		Emit:          rc.Bus.Publish,
@@ -844,13 +857,18 @@ func resolveScopeInputs(scope *ir.Scope, rc runCtx, stepsSnap map[string]expr.St
 	// workflow.dir set from scope.Dir. We deliberately don't expose
 	// other inputs to defaults to sidestep the chicken-and-egg of
 	// input-order dependencies inside one workflow file.
+	defaultScopeWS := rc.Workspace.StepsDir
+	if d, err := rc.Workspace.ScopeDir(scope.Prefix); err == nil {
+		defaultScopeWS = d
+	}
 	defaultEnv := expr.Env{
-		Inputs:      map[string]any{},
-		Steps:       map[string]expr.StepView{},
-		Env:         rc.Env,
-		Secrets:     map[string]string{},
-		Run:         expr.RunMeta{ID: rc.RunID, Workspace: rc.Workspace.StepsDir},
-		WorkflowDir: scope.Dir,
+		Inputs:       map[string]any{},
+		Steps:        map[string]expr.StepView{},
+		Env:          rc.Env,
+		Secrets:      map[string]string{},
+		Run:          expr.RunMeta{ID: rc.RunID, Workspace: rc.Workspace.StepsDir},
+		WorkflowDir:  scope.Dir,
+		WorkspaceDir: defaultScopeWS,
 	}
 	out := make(map[string]any, len(scope.Inputs))
 	for name, b := range scope.Inputs {
@@ -873,9 +891,36 @@ func resolveScopeInputs(scope *ir.Scope, rc runCtx, stepsSnap map[string]expr.St
 			out[name] = fmt.Sprintf("<expr-error: %s: %v>", b.Expr, err)
 			continue
 		}
+		// with_if_set: an empty result means "caller didn't actually
+		// supply this", so fall back to the child's own default rather
+		// than forcing "" on it.
+		if b.IfSet && isEmptyValue(v) {
+			fb := b.Fallback
+			if s, ok := fb.(string); ok && strings.Contains(s, "${{") {
+				if iv, ierr := rc.Expr.Interpolate(s, defaultEnv); ierr == nil {
+					fb = iv
+				}
+			}
+			out[name] = fb
+			continue
+		}
 		out[name] = v
 	}
 	return out
+}
+
+// isEmptyValue reports whether a resolved binding should count as
+// "not supplied" for with_if_set. nil and "" are the cases that
+// actually occur (an unset upstream input interpolates to ""); other
+// zero values like 0 or false are deliberately NOT treated as empty,
+// because `false` and `0` are legitimate explicit choices a caller
+// might mean to pass.
+func isEmptyValue(v any) bool {
+	if v == nil {
+		return true
+	}
+	s, ok := v.(string)
+	return ok && strings.TrimSpace(s) == ""
 }
 
 // resolveScopeSteps builds the child's local view of `steps.*`. Child
@@ -911,16 +956,27 @@ func resolveScopeSteps(scope *ir.Scope, stepsSnap map[string]expr.StepView) map[
 // recursively during input-binding evaluation.
 func envForScope(scope *ir.Scope, rc runCtx, stepsSnap map[string]expr.StepView) expr.Env {
 	dir := filepath.Dir(rc.Workflow.Path)
-	if scope != nil && scope.Dir != "" {
-		dir = scope.Dir
+	// workspace.dir must resolve at the scope being evaluated, not the
+	// run root — that's what makes `with: { out: "${{ workspace.dir
+	// }}/corpus" }` mean "the CALLER's workspace" and so let two
+	// children deliberately share one directory.
+	wsDir := rc.Workspace.StepsDir
+	if scope != nil {
+		if scope.Dir != "" {
+			dir = scope.Dir
+		}
+		if d, err := rc.Workspace.ScopeDir(scope.Prefix); err == nil {
+			wsDir = d
+		}
 	}
 	return expr.Env{
-		Inputs:      resolveScopeInputs(scope, rc, stepsSnap),
-		Steps:       resolveScopeSteps(scope, stepsSnap),
-		Env:         rc.Env,
-		Secrets:     map[string]string{},
-		Run:         expr.RunMeta{ID: rc.RunID, Workspace: rc.Workspace.StepsDir},
-		WorkflowDir: dir,
+		Inputs:       resolveScopeInputs(scope, rc, stepsSnap),
+		Steps:        resolveScopeSteps(scope, stepsSnap),
+		Env:          rc.Env,
+		Secrets:      map[string]string{},
+		Run:          expr.RunMeta{ID: rc.RunID, Workspace: rc.Workspace.StepsDir},
+		WorkflowDir:  dir,
+		WorkspaceDir: wsDir,
 	}
 }
 

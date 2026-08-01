@@ -147,6 +147,9 @@ func validateSteps(wf *Workflow) Errors {
 				}
 			}
 		}
+		if s.ActionType != "include" && (len(s.With) > 0 || len(s.WithIfSet) > 0) {
+			errs = append(errs, Error{Line: line, Path: path + ".with", Message: "with: / with_if_set: are only valid on an include step"})
+		}
 		if s.ActionType != "include" && strings.Contains(s.ID, ".") {
 			errs = append(errs, Error{Line: line, Path: path + ".id", Message: "id must not contain '.' (reserved for include step qualification)"})
 		}

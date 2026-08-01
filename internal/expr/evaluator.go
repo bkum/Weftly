@@ -72,6 +72,17 @@ type Env struct {
 	// `default: "${{ workflow.dir }}/../profiles.json"`) resolve
 	// against the file, not the run workspace.
 	WorkflowDir string
+	// WorkspaceDir is the absolute working directory of the step being
+	// evaluated — the run's shared workspace for a top-level step, or
+	// the scope's own subdirectory for a step inside an include.
+	// Exposed as `workspace.dir`.
+	//
+	// The pairing with WorkflowDir is the point: `workflow.dir` is
+	// where the CODE lives (read-only, shared by every run),
+	// `workspace.dir` is where this run's DATA goes (writable,
+	// per-scope). Confusing the two is the most common authoring
+	// mistake in composed workflows.
+	WorkspaceDir string
 }
 
 // Evaluator is safe for concurrent use once constructed.
@@ -249,6 +260,9 @@ func (e *Evaluator) envMap(env Env) map[string]any {
 		},
 		"workflow": map[string]any{
 			"dir": env.WorkflowDir,
+		},
+		"workspace": map[string]any{
+			"dir": env.WorkspaceDir,
 		},
 	}
 	if env.Response != nil {

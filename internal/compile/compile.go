@@ -295,16 +295,35 @@ func stripWrap(s string) string {
 // expression (from the parent) or a literal default, and rejects both
 // missing-required and unknown-input errors.
 func bindInputs(step *schema.Step, child *schema.Workflow) (map[string]ir.Binding, error) {
-	// with: keys the child never declared → typo class of errors.
-	for k := range step.With {
-		if _, ok := child.Inputs[k]; !ok {
-			return nil, fmt.Errorf("step %q include: with: key %q is not a declared input of %s", step.ID, k, child.Path)
+	// with:/with_if_set: keys the child never declared → typo class of errors.
+	for _, m := range []map[string]string{step.With, step.WithIfSet} {
+		for k := range m {
+			if _, ok := child.Inputs[k]; !ok {
+				return nil, fmt.Errorf("step %q include: with: key %q is not a declared input of %s", step.ID, k, child.Path)
+			}
+		}
+	}
+	// The same key in both maps is ambiguous — one unconditionally
+	// overrides, the other conditionally defers. Reject rather than
+	// silently pick.
+	for k := range step.WithIfSet {
+		if _, dup := step.With[k]; dup {
+			return nil, fmt.Errorf("step %q include: key %q appears in both with: and with_if_set: — use one", step.ID, k)
 		}
 	}
 	out := make(map[string]ir.Binding, len(child.Inputs))
 	for name, in := range child.Inputs {
 		if expr, ok := step.With[name]; ok {
 			out[name] = ir.Binding{Expr: expr, IsExpr: true, Secret: in.Secret}
+			continue
+		}
+		if expr, ok := step.WithIfSet[name]; ok {
+			// Carry the child's own default as the fallback so an
+			// empty runtime value lands on it instead of on "".
+			out[name] = ir.Binding{
+				Expr: expr, IsExpr: true, Secret: in.Secret,
+				IfSet: true, Fallback: in.Default,
+			}
 			continue
 		}
 		if in.Default != nil {

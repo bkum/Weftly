@@ -401,3 +401,283 @@ steps:
 		}
 	}
 }
+
+// --- Wave 1: workspace isolation, workspace.dir, with_if_set ---------
+
+// TestIncludeScopedWorkspacesDoNotCollide is the headline correctness
+// case: the SAME fragment included twice, each writing the same
+// relative path, must produce two distinct files rather than one
+// silently overwriting the other.
+func TestIncludeScopedWorkspacesDoNotCollide(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "lib.yml"), []byte(`
+name: lib
+inputs:
+  tag: { required: true }
+steps:
+  - id: write
+    run: |
+      mkdir -p ./corpus
+      echo "$TAG" > ./corpus/manifest.json
+      echo "path=$(pwd)/corpus/manifest.json" >> "$WEFTLY_OUTPUT"
+    env:
+      TAG: "${{ inputs.tag }}"
+outputs:
+  path: "${{ steps.write.outputs.path }}"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	main := filepath.Join(dir, "main.yml")
+	if err := os.WriteFile(main, []byte(`
+name: caller
+steps:
+  - id: alpha
+    include: lib.yml
+    with: { tag: "from-alpha" }
+  - id: beta
+    include: lib.yml
+    with: { tag: "from-beta" }
+  - id: verify
+    run: |
+      echo "alpha file: $A"
+      echo "beta file:  $B"
+      test "$A" != "$B" || { echo "same path — scopes collided"; exit 1; }
+      grep -q from-alpha "$A" || { echo "alpha clobbered"; exit 1; }
+      grep -q from-beta  "$B" || { echo "beta clobbered"; exit 1; }
+    env:
+      A: "${{ steps.alpha.outputs.path }}"
+      B: "${{ steps.beta.outputs.path }}"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wf, err := schema.Load(main)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := engine.Run(context.Background(), wf, engine.Options{
+		BaseDir: t.TempDir(), Bus: events.NewBus(),
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Status != events.Success {
+		t.Fatalf("want success, got %s", res.Status)
+	}
+}
+
+// TestIncludeSharedWorkspaceViaWorkspaceDir is the deliberate opposite
+// of the test above: passing `${{ workspace.dir }}` through with:
+// evaluates in the PARENT scope, so both children cooperate on one
+// directory when the author actually wants that.
+func TestIncludeSharedWorkspaceViaWorkspaceDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "lib.yml"), []byte(`
+name: lib
+inputs:
+  out_dir: { required: true }
+  tag:     { required: true }
+steps:
+  - id: write
+    run: |
+      mkdir -p "$OUT"
+      echo "$TAG" > "$OUT/$TAG.txt"
+    env:
+      OUT: "${{ inputs.out_dir }}"
+      TAG: "${{ inputs.tag }}"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	main := filepath.Join(dir, "main.yml")
+	if err := os.WriteFile(main, []byte(`
+name: caller
+steps:
+  - id: alpha
+    include: lib.yml
+    with:
+      out_dir: "${{ workspace.dir }}/corpus"
+      tag: alpha
+  - id: beta
+    include: lib.yml
+    with:
+      out_dir: "${{ workspace.dir }}/corpus"
+      tag: beta
+  - id: verify
+    run: |
+      ls ./corpus
+      test -f ./corpus/alpha.txt || { echo "missing alpha"; exit 1; }
+      test -f ./corpus/beta.txt  || { echo "missing beta";  exit 1; }
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wf, _ := schema.Load(main)
+	res, err := engine.Run(context.Background(), wf, engine.Options{
+		BaseDir: t.TempDir(), Bus: events.NewBus(),
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Status != events.Success {
+		t.Fatalf("want success, got %s", res.Status)
+	}
+}
+
+// TestWorkspaceDirAndWorkflowDirDiffer pins the distinction the two
+// namespaces exist to draw: workflow.dir is where the CODE lives,
+// workspace.dir is where this run's DATA goes.
+func TestWorkspaceDirAndWorkflowDirDiffer(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "lib.yml"), []byte(`
+name: lib
+steps:
+  - id: probe
+    run: |
+      echo "wf=$WF"
+      echo "ws=$WS"
+      test "$WF" != "$WS" || { echo "workflow.dir == workspace.dir"; exit 1; }
+      test -f "$WF/lib.yml" || { echo "workflow.dir is not the file's dir"; exit 1; }
+      test -d "$WS" || { echo "workspace.dir does not exist"; exit 1; }
+    env:
+      WF: "${{ workflow.dir }}"
+      WS: "${{ workspace.dir }}"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	main := filepath.Join(dir, "main.yml")
+	if err := os.WriteFile(main, []byte(`
+name: caller
+steps:
+  - id: sub
+    include: lib.yml
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wf, _ := schema.Load(main)
+	res, err := engine.Run(context.Background(), wf, engine.Options{
+		BaseDir: t.TempDir(), Bus: events.NewBus(),
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Status != events.Success {
+		t.Fatalf("want success, got %s", res.Status)
+	}
+}
+
+// TestWithIfSetKeepsChildDefaultWhenEmpty is the reproduced
+// blank-clobbers-default bug: a caller forwarding its own unset
+// optional input must not force "" onto the child.
+func TestWithIfSetKeepsChildDefaultWhenEmpty(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "lib.yml"), []byte(`
+name: lib
+inputs:
+  parties: { default: "SENSIBLE_DEFAULT" }
+steps:
+  - id: check
+    run: |
+      echo "parties=$P"
+      test "$P" = "SENSIBLE_DEFAULT" || { echo "default was clobbered with '$P'"; exit 1; }
+    env:
+      P: "${{ inputs.parties }}"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	main := filepath.Join(dir, "main.yml")
+	if err := os.WriteFile(main, []byte(`
+name: caller
+inputs:
+  parties: { default: "" }
+steps:
+  - id: sub
+    include: lib.yml
+    with_if_set:
+      parties: "${{ inputs.parties }}"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wf, _ := schema.Load(main)
+	res, err := engine.Run(context.Background(), wf, engine.Options{
+		BaseDir: t.TempDir(), Bus: events.NewBus(),
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Status != events.Success {
+		t.Fatalf("want success, got %s", res.Status)
+	}
+}
+
+// TestWithIfSetOverridesWhenSupplied is the other half of the
+// contract: a non-empty value must still win.
+func TestWithIfSetOverridesWhenSupplied(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "lib.yml"), []byte(`
+name: lib
+inputs:
+  parties: { default: "SENSIBLE_DEFAULT" }
+steps:
+  - id: check
+    run: |
+      test "$P" = "CALLER_VALUE" || { echo "override lost, got '$P'"; exit 1; }
+    env:
+      P: "${{ inputs.parties }}"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	main := filepath.Join(dir, "main.yml")
+	if err := os.WriteFile(main, []byte(`
+name: caller
+inputs:
+  parties: { default: "CALLER_VALUE" }
+steps:
+  - id: sub
+    include: lib.yml
+    with_if_set:
+      parties: "${{ inputs.parties }}"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wf, _ := schema.Load(main)
+	res, err := engine.Run(context.Background(), wf, engine.Options{
+		BaseDir: t.TempDir(), Bus: events.NewBus(),
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Status != events.Success {
+		t.Fatalf("want success, got %s", res.Status)
+	}
+}
+
+// TestWithAndWithIfSetSameKeyRejected — ambiguous, must not silently pick.
+func TestWithAndWithIfSetSameKeyRejected(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "lib.yml"), []byte(`
+name: lib
+inputs:
+  x: { default: "d" }
+steps:
+  - id: noop
+    run: echo hi
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	main := filepath.Join(dir, "main.yml")
+	if err := os.WriteFile(main, []byte(`
+name: caller
+steps:
+  - id: sub
+    include: lib.yml
+    with:        { x: "a" }
+    with_if_set: { x: "b" }
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wf, _ := schema.Load(main)
+	_, err := engine.Run(context.Background(), wf, engine.Options{
+		BaseDir: t.TempDir(), Bus: events.NewBus(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "both with:") {
+		t.Fatalf("want both-maps rejection, got %v", err)
+	}
+}

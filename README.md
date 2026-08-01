@@ -109,14 +109,32 @@ step id (`resolve-id`) parses as subtraction inside an expression
 | `assert`   | Standalone boolean checkpoint. |
 | `summary`  | Emits markdown into the final report. |
 | `upload`   | Copies a workspace file/glob into `./.weftly/runs/<id>/artifacts/`. |
-| `prompt`   | Reserved. Interactive prompts are a Phase 2 feature. |
+| `prompt`   | Interactive input: `text`, `password`, `confirm`, `select`. `--yes` auto-answers every `confirm`. |
+| `wait`     | Polls until a condition holds or a time budget expires. |
+| `parse`    | Extracts structure from text (JSON flattening, regex named groups) into step outputs. |
+| `notify`   | POSTs a Slack-shaped or fully custom payload to a webhook. Non-2xx fails the step. |
+| `include`  | Calls another workflow as a step, passing inputs via `with:` / `with_if_set:` and consuming its declared `outputs:`. See [docs/FEATURES.md](docs/FEATURES.md#4-workflow-composition-include). |
+
+A complete, verified feature record — including what is **not**
+implemented — lives in [docs/FEATURES.md](docs/FEATURES.md).
 
 ### Expressions
 
 `${{ ... }}` spans are evaluated by [expr-lang/expr](https://github.com/expr-lang/expr).
 Namespaces: `inputs.<name>`, `steps.<id>.outputs.<key>`,
-`steps.<id>.status`, `env.<KEY>`, `secrets.<name>`, `run.{id,workspace}`,
-and (inside `http`) `response.{status,headers,body,raw}`.
+`steps.<id>.status`, `env.<KEY>`, `secrets.<name>`,
+`run.{id,workspace,status,cancelled}`, `each.{value,index}` (inside
+`for-each`), `workflow.dir`, `workspace.dir`, and (inside `http`)
+`response.{status,headers,body,raw}`.
+
+Status functions `success()`, `failure()`, `always()`, and `cancelled()`
+are available, and are what make `cleanup:` gates work.
+
+`workflow.dir` is the directory of the YAML file that authored the step —
+where the *code* lives, read-only and shared by every run. `workspace.dir`
+is that step's working directory — where this run's *data* goes, writable
+and per-scope. Reach a library's bundled assets with the former, place
+output with the latter.
 
 Helpers registered by weftly: `default(v, fb)`, `fromJSON(s)`,
 `toJSON(v)`, `urlquery(s)`. String ops are expr-native operators:
@@ -159,6 +177,9 @@ weftly import-gha <path-or-->          Convert a GitHub Actions workflow to
 weftly server                          Start the REST + SSE + UI server
   --addr :8080           listen address
   --dir  ./workflows     catalogue directory (only these workflows run)
+  --include-root <dir>   widen the boundary step-level `include:` may reach
+                         (defaults to --dir; set to a project root when
+                         workflows/ and lib/ are siblings)
   --runs-dir ./.weftly   parent directory for per-run state
   --token ...            single bearer token (or $WEFTLY_TOKEN)
   --auth-file <path>     multi-token RBAC file (supersedes --token)

@@ -80,7 +80,7 @@ func (uploadAction) Run(ctx context.Context, sc *StepContext) (Outputs, error) {
 		if fi.IsDir() {
 			continue
 		}
-		dst := filepath.Join(sc.ArtifactsDir, filepath.Base(m))
+		dst := filepath.Join(sc.ArtifactsDir, artifactName(sc.ScopePrefix, filepath.Base(m)))
 		if err := copyFile(m, dst); err != nil {
 			return nil, err
 		}
@@ -99,6 +99,27 @@ func (uploadAction) Run(ctx context.Context, sc *StepContext) (Outputs, error) {
 	return Outputs{"count": len(matches), "size": totalSize}, nil
 }
 
+// artifactName qualifies a collected file's name with the include
+// scope it came from, so two uses of the same fragment in one run
+// produce `edi_a__report.html` and `edi_b__report.html` rather than
+// silently overwriting one `report.html`.
+//
+// Qualification is unconditional inside a scope rather than
+// on-collision. Detecting a collision would mean statting the
+// destination, which races under the parallel scheduler: two sibling
+// scopes finishing at the same instant would both see "no collision"
+// and both write the same path. A deterministic name that doesn't
+// depend on completion order is worth the slightly longer filename.
+//
+// Top-level steps (ScopePrefix == "") are unaffected, so existing
+// workflows keep the artifact names they already publish.
+func artifactName(scopePrefix, base string) string {
+	if scopePrefix == "" {
+		return base
+	}
+	return scopePrefix + "__" + base
+}
+
 // mirrorToStore reads a local artifact file back and Puts it into the
 // configured remote store under key "<run-id>/<basename>". Called only
 // when sc.ArtifactStore is non-nil. Honours the step context so a
@@ -111,6 +132,11 @@ func mirrorToStore(ctx context.Context, sc *StepContext, path string, size int64
 		return err
 	}
 	defer f.Close()
+	// path is the already-qualified local destination, so Base() carries
+	// any scope prefix into the object key too. That agreement is load-
+	// bearing: qualifying locally but not remotely would separate two
+	// siblings' artifacts on disk and then re-collide them in the
+	// bucket, which is the same data-loss bug one tier down.
 	key := filepath.Base(path)
 	if sc.RunID != "" {
 		key = sc.RunID + "/" + key

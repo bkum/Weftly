@@ -138,6 +138,18 @@ type Step struct {
 	// contract at `steps.<this-id>.outputs.*`.
 	Include string            `yaml:"include"`
 	With    map[string]string `yaml:"with"`
+	// WithIfSet binds a child input ONLY when the expression evaluates
+	// to a non-empty value; otherwise the child's own `default:` stays
+	// in force. This is the conditional-passthrough case that plain
+	// `with:` gets wrong: a caller forwarding its own optional input
+	// (`parties_json: "${{ inputs.parties_json }}"`) clobbers the
+	// child's carefully-chosen default with "" whenever the caller's
+	// input wasn't supplied.
+	//
+	// Deciding at runtime rather than compile time is required — the
+	// bound expression can reference a prior step's output, whose
+	// emptiness isn't knowable until that step runs.
+	WithIfSet map[string]string `yaml:"with_if_set"`
 
 	// Populated by custom unmarshal. ActionType is one of actionKeys.
 	// ActionNode holds the raw YAML for that action's config so per-action

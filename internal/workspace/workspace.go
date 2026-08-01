@@ -73,3 +73,43 @@ func SafeJoin(base, p string) (string, error) {
 	}
 	return clean, nil
 }
+
+// ScopeDir returns (creating on first use) the working directory for a
+// step-level include scope, given the scope's dotted prefix ("edi", or
+// "a.b" when nested). Top-level steps pass "" and get the run's shared
+// StepsDir unchanged.
+//
+// Each scope owning its own directory is what makes an included
+// fragment safe to use twice in one run: two includes of a fragment
+// that both write ./corpus/manifest.json land in
+//
+//	workspace/edi_a/corpus/manifest.json
+//	workspace/edi_b/corpus/manifest.json
+//
+// instead of silently overwriting each other in the single shared
+// workspace. A caller that WANTS the shared directory can still get it
+// by passing `${{ workspace.dir }}/corpus` through `with:` — that
+// expression is evaluated in the PARENT scope, so it resolves to the
+// parent's workspace and both children cooperate on one tree.
+//
+// Dots in the prefix become path separators so a nested scope nests on
+// disk too, mirroring the logical structure.
+func (w *Workspace) ScopeDir(prefix string) (string, error) {
+	if prefix == "" {
+		return w.StepsDir, nil
+	}
+	// Defence in depth: a prefix is built from validated step ids
+	// ([a-z0-9_]+ joined by dots) so it cannot contain separators or
+	// "..", but this is a path join from a compile-time string and the
+	// cost of checking is nil.
+	for _, part := range strings.Split(prefix, ".") {
+		if part == "" || part == "." || part == ".." || strings.ContainsAny(part, `/\`) {
+			return "", fmt.Errorf("workspace: refusing unsafe scope prefix %q", prefix)
+		}
+	}
+	dir := filepath.Join(w.StepsDir, filepath.Join(strings.Split(prefix, ".")...))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
