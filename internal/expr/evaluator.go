@@ -83,6 +83,16 @@ type Env struct {
 	// per-scope). Confusing the two is the most common authoring
 	// mistake in composed workflows.
 	WorkspaceDir string
+	// ScopeStatus, when non-empty, is the aggregate status of the
+	// enclosing include scope and takes precedence over Run.Status for
+	// success() / failure(). It is what makes a fragment's own
+	// `finally:` block able to ask "did MY steps succeed" rather than
+	// "did the whole run succeed" — the two differ whenever a sibling
+	// include failed, which is exactly when teardown decisions matter.
+	//
+	// Empty for top-level steps, where the run's status is the right
+	// answer and Run.Status is used unchanged.
+	ScopeStatus string
 }
 
 // Evaluator is safe for concurrent use once constructed.
@@ -283,7 +293,12 @@ func (e *Evaluator) envMap(env Env) map[string]any {
 	// re-registered per envMap() call so the value they see always
 	// matches the evaluator's current invocation, never a stale one
 	// from the compile-time cache.
+	// Scope status wins when set: inside an include, success() must mean
+	// "this fragment's steps succeeded", not "the run succeeded".
 	status := env.Run.Status
+	if env.ScopeStatus != "" {
+		status = env.ScopeStatus
+	}
 	cancelled := env.Run.Cancelled
 	m["success"] = func(args ...any) (any, error) {
 		return status == "" || status == "success", nil

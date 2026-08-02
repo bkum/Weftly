@@ -210,6 +210,7 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 		Secrets:       sec,
 		Env:           baseEnv,
 		Steps:         stepViews,
+		ScopeStatus:   map[string]events.Status{},
 		StepMu:        &stepMu,
 		ResumeCache:   resumeCache,
 		Workspace:     ws,
@@ -222,7 +223,15 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 		RunID:         runID,
 	}
 	overallStatus := schedule(ctx, graph, parallel, func(ctx context.Context, node *ir.StepNode) events.Status {
-		return runStep(ctx, node, rc)
+		st := runStep(ctx, node, rc)
+		// One recording point covers every terminal path in runStep
+		// (success, failure, timeout, skip, cascade-skip) — including
+		// the synthetic exec() the scheduler makes for cascade-skipped
+		// nodes. A fragment's finally: steps are gated by needs: on its
+		// main steps, so those statuses are always recorded before the
+		// teardown builds its expression env.
+		recordScopeStatus(rc, node, st)
+		return st
 	})
 
 	// Cleanup pass. Runs sequentially (no needs: edges among cleanup
@@ -274,6 +283,13 @@ type runCtx struct {
 	// cleanup step. Feeds success()/failure() so cleanup gates work.
 	CleanupStatus    string
 	CleanupCancelled bool
+
+	// ScopeStatus accumulates the worst terminal status seen per include
+	// scope prefix, so a fragment's own `finally:` steps can gate on
+	// whether THAT fragment succeeded rather than on the whole run.
+	// Shares StepMu with Steps — both are written from parallel step
+	// goroutines and read when building an expression env.
+	ScopeStatus map[string]events.Status
 	// ForEachIter, when non-nil, means we're inside one iteration of a
 	// for-each expansion. runStep injects it into envForExpr as `each`
 	// and skips re-expansion. Nil for regular steps.
@@ -411,6 +427,7 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 		Each:         rc.ForEachIter, // nil outside a for-each iteration
 		WorkflowDir:  workflowDir,
 		WorkspaceDir: stepWorkdir,
+		ScopeStatus:  scopeStatusFor(rc, node),
 	}
 	// Give expressions access to secrets by name too.
 	for _, name := range secretNames(rc.Workflow) {
@@ -621,6 +638,81 @@ finishAttempts:
 // execution doesn't race on the map. Anonymous steps (empty id) are
 // tracked in the map under a synthetic key so the scheduler's completion
 // tally is correct, but nobody references them via expressions.
+// recordScopeStatus folds a finished step's status into the aggregate
+// for its scope and every ancestor scope. "edi.inner.step" contributes
+// to both "edi.inner" and "edi", so an outer fragment's finally: sees
+// a nested failure. Worst-status-wins: once a scope is failed it stays
+// failed, which is the semantics `failure()` needs.
+func recordScopeStatus(rc runCtx, node *ir.StepNode, st events.Status) {
+	if node.Scope == nil || node.Scope.Prefix == "" {
+		return
+	}
+	// finally: steps must not fold their own outcome back into the
+	// scope they are reporting on — otherwise a successful teardown
+	// would flip a failed scope back to success mid-block.
+	if node.RunAlways {
+		return
+	}
+	// A continue-on-error failure still failed. `continue-on-error` is a
+	// statement about run CONTROL FLOW ("don't halt the graph"), not
+	// about whether the work succeeded — and teardown cares only about
+	// the latter. A fragment that half-built a tenant and was allowed to
+	// continue must still see failure() in its own finally: block.
+	if st == events.FailedContinued {
+		st = events.Failed
+	}
+	rc.StepMu.Lock()
+	defer rc.StepMu.Unlock()
+	prefix := node.Scope.Prefix
+	for {
+		if worseStatus(st, rc.ScopeStatus[prefix]) {
+			rc.ScopeStatus[prefix] = st
+		}
+		i := strings.LastIndex(prefix, ".")
+		if i < 0 {
+			break
+		}
+		prefix = prefix[:i]
+	}
+}
+
+// worseStatus reports whether a is a worse outcome than b, using the
+// ordering the status functions care about: a fatal beats a soft
+// failure beats success. An empty current value is "nothing recorded
+// yet", so anything beats it.
+func worseStatus(a, b events.Status) bool {
+	return statusRank(a) > statusRank(b)
+}
+
+func statusRank(s events.Status) int {
+	switch s {
+	case events.Failed, events.TimedOut:
+		return 3
+	case events.FailedContinued:
+		return 2
+	case events.Success, events.Skipped:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// scopeStatusFor reads the aggregate for a node's scope. Returns "" for
+// top-level steps so the run status is used instead.
+func scopeStatusFor(rc runCtx, node *ir.StepNode) string {
+	if node.Scope == nil || node.Scope.Prefix == "" {
+		return ""
+	}
+	rc.StepMu.Lock()
+	defer rc.StepMu.Unlock()
+	st, ok := rc.ScopeStatus[node.Scope.Prefix]
+	if !ok {
+		// Nothing recorded yet means nothing has failed yet.
+		return string(events.Success)
+	}
+	return string(st)
+}
+
 func setStepView(rc runCtx, id string, sv expr.StepView) {
 	if id == "" {
 		return

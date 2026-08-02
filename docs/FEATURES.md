@@ -12,11 +12,13 @@ package that implements it so a reader can go straight to the code.
 
 | Feature | Status | Notes | Implementation |
 |---|---|---|---|
-| YAML workflow schema | ✅ | `name`, `description`, `inputs`, `env`, `defaults`, `steps`, `cleanup`, `outputs`, `requires` | `internal/schema` |
+| YAML workflow schema | ✅ | `name`, `description`, `inputs`, `env`, `defaults`, `steps`, `cleanup`, `finally`, `outputs`, `requires`, `library` | `internal/schema` |
 | Static validation | ✅ | `weftly validate` — ids, action keys, `needs` references, `needs` cycles, retry bounds | `internal/schema/validate.go` |
 | Compile to IR | ✅ | Workflow → topologically-schedulable `[]StepNode` | `internal/compile`, `internal/ir` |
 | Step ids | ✅ | Must match `[a-z0-9_]+`. **Underscores only — hyphens are rejected** because `resolve-id` parses as subtraction inside an expression | `internal/schema/validate.go` |
 | `requires:` preflight | ✅ | Named host tools checked on `PATH` before any step runs | `internal/engine` |
+| `library: true` | ✅ | Marks a fragment that may only be *included*, never run directly. Excluded from `GET /workflows`, rejected by `POST /runs` and at schedule-load time. An authorisation control, not presentation | `internal/server/catalogue.go` |
+| `finally:` | ✅ | Scope teardown belonging to the workflow that declares it — see §5 | `internal/compile`, `internal/engine/scheduler.go` |
 
 ### Step modifiers
 
@@ -86,9 +88,16 @@ writable and per-scope (use it to place output).
 | `always()` | ✅ | Always true |
 | `cancelled()` | ✅ | Run context was cancelled |
 
-Populated meaningfully during the `cleanup:` pass, which is what the
-helpers exist for. **Scope-relative evaluation is not implemented** —
-they report the *run's* aggregate status, not an enclosing include's.
+**Scope-relative.** Inside a step that belongs to an include, `success()`
+and `failure()` report *that scope's* aggregate status, not the run's —
+so a fragment's `finally:` can ask "did **my** steps succeed" rather
+than "did anything anywhere fail". Top-level steps see the run status
+unchanged.
+
+A `continue-on-error` failure counts as `failure()` for scope status.
+`continue-on-error` is a statement about run control flow ("don't halt
+the graph"), not about whether the work succeeded — and teardown cares
+only about the latter.
 
 ### Built-in helpers
 
@@ -138,8 +147,8 @@ a callable unit. Cycles detected.
 | Path confinement | ✅ | Symlinks resolved, then confined — see §7 |
 | Modifier propagation | ✅ | `if:` conjoined into each child; `continue-on-error:` propagated; `needs:` applied to the first child |
 | Rejected modifiers | ✅ | `env:`, `timeout:`, `retry:`, `for-each:` on an include step are validation errors naming the alternative |
-| `finally:` (scope teardown) | ❌ | Only run-level `cleanup:` exists |
-| `library: true` | ❌ | Fragments are not yet excluded from the catalogue — see §10 |
+| `finally:` (scope teardown) | ✅ | Per-scope teardown; runs after the fragment's own steps whatever the outcome, innermost-first. See §5 |
+| `library: true` | ✅ | Fragment excluded from the catalogue, rejected as a run target and as a schedule target, still includable |
 | `type: path` outputs | ❌ | No automatic rebasing of path-typed outputs |
 
 ---
@@ -151,7 +160,8 @@ a callable unit. Cycles detected.
 | DAG scheduler | ✅ | Honours `needs:`; independent branches run concurrently |
 | `--parallel N` | ✅ | Global concurrency cap, default 4 |
 | Cascade skip | ✅ | Downstream of a fatal failure is `skipped`, not run |
-| `cleanup:` | ✅ | Run-level teardown after the main graph, whatever the outcome; sees real run status via status functions |
+| `cleanup:` | ✅ | **Run-level** teardown after the main graph, whatever the outcome; sees real run status via status functions |
+| `finally:` | ✅ | **Scope-level** teardown. Belongs to the workflow that declares it, so an included fragment tears down only what it created. Runs innermost-first; exempt from cascade-skip, because teardown exists to run after failure |
 | `--resume <run-id>` | ✅ | Replays successful steps from `state.json`, re-runs the rest |
 | Cancellation | ✅ | SIGINT / `DELETE /runs/{id}`; cleanup still runs via a detached context |
 | Per-run workspace | ✅ | `.weftly/runs/<run-id>/workspace` (+ per-scope subdirectories) |
@@ -264,9 +274,6 @@ Tracked so the gap is explicit rather than discovered.
 
 | Item | Why it matters |
 |---|---|
-| `finally:` — scope-level teardown | Run-level `cleanup:` exists, but a failed include can't tear down just its own work |
-| Scope-relative status functions | `success()` / `failure()` report run status, not enclosing-scope status — the prerequisite for `finally:` |
-| `library: true` | **Authorisation gap.** Library fragments are ordinary catalogue entries: independently runnable by any principal with `workflows: "*"`, and schedulable |
 | `type: path` outputs | Path outputs crossing an include boundary are not rebased automatically |
 | `$WEFTLY_OUTPUT_JSON` / `outputs_from:` | `Outputs` is already `map[string]any`, but a `run` step can only emit `key=value` strings |
 | Typed input constraints | `enum` ships; `int` / `min` / `max` / `pattern` do not |

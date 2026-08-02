@@ -115,6 +115,30 @@ step id (`resolve-id`) parses as subtraction inside an expression
 | `notify`   | POSTs a Slack-shaped or fully custom payload to a webhook. Non-2xx fails the step. |
 | `include`  | Calls another workflow as a step, passing inputs via `with:` / `with_if_set:` and consuming its declared `outputs:`. See [docs/FEATURES.md](docs/FEATURES.md#4-workflow-composition-include). |
 
+### Teardown
+
+`cleanup:` is **run-level** — it fires once after the whole graph,
+whatever the outcome. `finally:` is **scope-level** — it belongs to the
+workflow that declares it, so an included fragment tears down only what
+it created, without knowing anything about its caller. Nested fragments
+tear down innermost-first, and teardown steps are exempt from the
+cascade-skip that stops ordinary downstream work after a failure.
+
+Inside a fragment's `finally:`, `success()` / `failure()` report *that
+fragment's* status, not the run's.
+
+### Library fragments
+
+`library: true` marks a workflow that may only be *included*, never run
+on its own. It is excluded from the served catalogue, rejected as a
+`POST /runs` target, and rejected when a schedule names it — but stays
+freely includable.
+
+This is an authorisation control. Without it, every fragment in a
+toolkit is an ordinary catalogue entry that any principal holding
+`workflows: "*"` can trigger directly or schedule, despite being written
+to run only as part of a caller that supplies its inputs.
+
 A complete, verified feature record — including what is **not**
 implemented — lives in [docs/FEATURES.md](docs/FEATURES.md).
 

@@ -180,6 +180,45 @@ func compileSteps(steps []schema.Step, parentScope *ir.Scope, dir, sourceFile st
 		// child.outputs entries are well-formed strings.
 		out = append(out, childNodes...)
 
+		// Scope teardown. The child's `finally:` steps run after its own
+		// steps, whatever their outcome — RunAlways exempts them from the
+		// scheduler's cascade-skip, which is right for downstream work but
+		// exactly wrong for teardown.
+		//
+		// Ordering is innermost-first by construction: a nested include's
+		// finally nodes were already appended by the recursive call above,
+		// so they precede this scope's in `out` and therefore in the
+		// topological walk.
+		if len(child.Finally) > 0 {
+			finallyNodes, ferr := compileSteps(child.Finally, childScope, filepath.Dir(incPath), incPath, newChain, opts, root)
+			if ferr != nil {
+				return nil, ferr
+			}
+			var prev string
+			if len(childNodes) > 0 {
+				prev = childNodes[len(childNodes)-1].ID
+			}
+			for i, fn := range finallyNodes {
+				fn.RunAlways = true
+				// Namespace teardown ids so they can't collide with the
+				// fragment's main steps, and chain them sequentially after
+				// the last main step.
+				fn.ID = childPrefix + ".finally." + fn.LocalID
+				if i == 0 {
+					if prev != "" {
+						fn.Needs = []string{prev}
+					}
+				} else {
+					fn.Needs = []string{finallyNodes[i-1].ID}
+				}
+			}
+			out = append(out, finallyNodes...)
+			// The outputs shim (below) must land after teardown so the
+			// include's own completion genuinely means "everything this
+			// fragment does is finished".
+			childNodes = append(childNodes, finallyNodes...)
+		}
+
 		// Synthesized outputs node: an internal `include_outputs`
 		// action that evaluates each entry of child.Outputs in the
 		// child scope at runtime, producing them as its own Outputs so

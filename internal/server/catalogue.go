@@ -19,6 +19,10 @@ type catalogueEntry struct {
 	Path        string                  `json:"-"` // never surfaced to clients
 	Inputs      map[string]schema.Input `json:"inputs,omitempty"`
 	Workflow    *schema.Workflow        `json:"-"` // for run dispatch
+	// Library fragments are loaded (so includes and diagnostics work) but
+	// are neither listed nor runnable. Never surfaced to clients — a
+	// client should not be able to enumerate what it cannot run.
+	Library bool `json:"-"`
 }
 
 type catalogue struct {
@@ -59,16 +63,23 @@ func loadCatalogue(dir string) (*catalogue, error) {
 			Path:        path,
 			Inputs:      wf.Inputs,
 			Workflow:    wf,
+			Library:     wf.Library,
 		}
 	}
 	return c, nil
 }
 
+// list returns the RUNNABLE catalogue. Library fragments are loaded and
+// kept in byID (so a request naming one can be answered with a specific
+// error rather than a bare 404) but never advertised.
 func (c *catalogue) list() []*catalogueEntry {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	out := make([]*catalogueEntry, 0, len(c.byID))
 	for _, e := range c.byID {
+		if e.Library {
+			continue
+		}
 		out = append(out, e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -76,6 +87,22 @@ func (c *catalogue) list() []*catalogueEntry {
 }
 
 func (c *catalogue) get(id string) *catalogueEntry {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	e := c.byID[id]
+	// A library is not part of the served catalogue. Returning nil here
+	// makes every existing caller — GET /workflows/{id}, POST /runs, the
+	// scheduler — reject it without each having to remember the rule.
+	if e != nil && e.Library {
+		return nil
+	}
+	return e
+}
+
+// getIncludingLibraries returns an entry even when it is a library.
+// Used only to distinguish "no such workflow" from "that is a library
+// fragment, not a runnable workflow" in error messages.
+func (c *catalogue) getIncludingLibraries(id string) *catalogueEntry {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.byID[id]

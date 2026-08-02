@@ -82,6 +82,38 @@ complete current feature record.
   an include may reach). Defaults to `--dir`; widen it for projects
   laying out `workflows/` and `lib/` as siblings.
 
+### Added — scope teardown and library fragments
+
+- **`finally:` — scope teardown.** Steps that run after *their own
+  workflow's* steps complete, whatever the outcome. Where `cleanup:` is
+  run-level and fires once at the very end, `finally:` belongs to the
+  workflow that declares it, so an included fragment can tear down just
+  what it created without knowing anything about its caller. Teardown
+  nodes are exempt from the scheduler's cascade-skip — that protection
+  is right for downstream work and exactly wrong for teardown, which
+  exists to run after failure. Nested fragments tear down
+  innermost-first.
+- **Scope-relative status functions.** Inside a step belonging to an
+  include, `success()` / `failure()` now report *that scope's*
+  aggregate status rather than the run's, so a fragment's `finally:`
+  can ask "did **my** steps succeed" instead of "did anything anywhere
+  fail". Top-level steps are unchanged. A `continue-on-error` failure
+  counts as `failure()` for this purpose: `continue-on-error` is about
+  run control flow, not about whether the work succeeded, and teardown
+  cares only about the latter.
+- **`library: true`.** Marks a fragment that may only be included,
+  never run on its own. Excluded from `GET /workflows` and
+  `GET /workflows/{id}`, rejected by `POST /runs`, and rejected at
+  schedule **load** time (not fire time — a schedule that only fails
+  when its cron next matches is a latent misconfiguration the operator
+  discovers hours later). Still freely includable.
+
+  This is an authorisation control rather than listing hygiene: without
+  it every fragment in a toolkit is an ordinary catalogue entry,
+  independently triggerable by any principal holding `workflows: "*"`
+  and schedulable, despite being written to run only as part of a
+  caller that supplies its inputs.
+
 ### Fixed
 
 - **Release archives were missing `workflows/` and `examples/`.**

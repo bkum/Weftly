@@ -70,6 +70,17 @@ type Workflow struct {
 	// This is the top-level "prelude" include (Phase 4). The step-level
 	// `include:` (with `with:`) is a different feature — see Step.Include.
 	Include []string `yaml:"include"`
+	// Library marks this file as a fragment meant only to be included by
+	// another workflow, never run on its own. A library is excluded from
+	// the served catalogue, rejected as a direct `POST /runs` target, and
+	// rejected at schedule-load time.
+	//
+	// This is an authorisation control, not presentation. Without it every
+	// fragment in a toolkit is an ordinary catalogue entry: independently
+	// triggerable by any principal holding `workflows: "*"`, and
+	// schedulable — even though it was written to run only as part of a
+	// caller that supplies its inputs.
+	Library bool `yaml:"library"`
 	// Outputs is the top-level output contract of the workflow, evaluated
 	// in the workflow's own scope after its steps have run. When this
 	// workflow is used as a step-level include, the parent references
@@ -81,6 +92,19 @@ type Workflow struct {
 	// failure() / cancelled() populated from the run's aggregate
 	// status so `if:` gates work.
 	Cleanup []Step `yaml:"cleanup"`
+	// Finally is scope teardown: steps that run after THIS workflow's
+	// own steps complete, whatever their outcome. Where `cleanup:` is
+	// run-level and fires once at the very end, `finally:` belongs to
+	// the workflow that declares it — so an included fragment can tear
+	// down just the resources it created without knowing anything
+	// about its caller.
+	//
+	// Inside a `finally:` block, success() / failure() report the
+	// ENCLOSING SCOPE's status, not the run's. That is the distinction
+	// that makes teardown decidable: a fragment wants to know whether
+	// it left a half-built tenant behind, not whether some unrelated
+	// sibling failed.
+	Finally []Step `yaml:"finally"`
 
 	// Source retains the parsed YAML root node for line-number-aware error
 	// reporting. Nil after a bare struct construction (e.g. tests).

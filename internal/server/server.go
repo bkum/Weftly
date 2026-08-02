@@ -168,9 +168,15 @@ func (s *Server) initScheduler() error {
 	if f != nil {
 		entries = f.Schedules
 	}
+	if err := s.rejectLibrarySchedules(entries); err != nil {
+		return err
+	}
 	sc := scheduler.New(s.log, func(ctx context.Context, wf string, inputs map[string]any) (string, error) {
 		entry := s.cat.get(wf)
 		if entry == nil {
+			if lib := s.cat.getIncludingLibraries(wf); lib != nil && lib.Library {
+				return "", fmt.Errorf("scheduled workflow %q is a library fragment (library: true) and cannot be scheduled", wf)
+			}
 			return "", fmt.Errorf("scheduled workflow %q not in catalogue", wf)
 		}
 		rec, err := s.runs.start(ctx, wf, entry.Workflow, inputs)
@@ -319,6 +325,9 @@ func (s *Server) reloadSchedules() error {
 	if f != nil {
 		entries = f.Schedules
 	}
+	if err := s.rejectLibrarySchedules(entries); err != nil {
+		return err
+	}
 	if err := s.sched.SetSchedules(entries, time.Now()); err != nil {
 		return err
 	}
@@ -343,4 +352,22 @@ func includeRootFor(cfg Config) string {
 		return cfg.IncludeRoot
 	}
 	return cfg.CatalogueDir
+}
+
+// rejectLibrarySchedules fails a schedule set that targets a library
+// fragment, at LOAD time rather than at fire time. A schedule that only
+// fails when its cron next matches is a latent misconfiguration — the
+// operator finds out hours later from a failed run instead of at
+// startup or reload.
+//
+// Applied on both paths (initial load and SIGHUP / POST /reload) so a
+// library target can't be introduced by an edit after startup either.
+func (s *Server) rejectLibrarySchedules(entries []scheduler.Entry) error {
+	for _, e := range entries {
+		if lib := s.cat.getIncludingLibraries(e.Workflow); lib != nil && lib.Library {
+			return fmt.Errorf("server: schedules: %q targets %q, which is a library fragment (library: true) and cannot be scheduled",
+				e.ID, e.Workflow)
+		}
+	}
+	return nil
 }

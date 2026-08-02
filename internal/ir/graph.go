@@ -54,6 +54,11 @@ type StepNode struct {
 	// (a compile error in an included file names the child file, not
 	// the caller).
 	SourceFile string
+	// RunAlways marks a teardown node from a `finally:` block. The
+	// scheduler dispatches these even when an upstream step failed —
+	// the cascade-skip that protects ordinary downstream work is
+	// precisely wrong for teardown, which exists to run after failure.
+	RunAlways bool
 }
 
 // Scope is the compile-time surface every included step's expressions

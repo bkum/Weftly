@@ -142,6 +142,16 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	}
 	entry := s.cat.get(req.Workflow)
 	if entry == nil {
+		// Distinguish "no such file" from "that file exists but is a
+		// library fragment" — an operator staring at the file on disk
+		// deserves better than a bare 404. The distinction leaks only
+		// the existence of a fragment the caller could already see by
+		// listing the catalogue directory they administer.
+		if lib := s.cat.getIncludingLibraries(req.Workflow); lib != nil && lib.Library {
+			writeError(w, http.StatusBadRequest,
+				req.Workflow+" is a library fragment (library: true) and cannot be run directly; include it from a workflow instead")
+			return
+		}
 		writeError(w, http.StatusNotFound, "unknown workflow: "+req.Workflow)
 		return
 	}
