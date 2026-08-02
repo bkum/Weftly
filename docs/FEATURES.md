@@ -253,6 +253,10 @@ full. Fine for idempotent bodies, wasteful otherwise.
 `--no-color` · `--strict` · `--yes` · `--parallel N` · `--resume` ·
 `--ci` · `--preset` · `--otel-endpoint`
 
+Server flags: `--addr` · `--dir` · `--include-root` · `--runs-dir` ·
+`--token` · `--auth-file` · `--schedules` · `--audit-file` ·
+`--otel-endpoint` · `--s3-*`
+
 `--dry-run` prints the **expanded** plan with qualified ids, so an
 include's children are visible before anything executes.
 
@@ -279,7 +283,7 @@ include's children are visible before anything executes.
 | Catalogue hot-reload | ✅ | `POST /reload` (admin) or SIGHUP |
 | OpenTelemetry | ✅ | `--otel-endpoint`, OTLP/HTTP, `workflow.run` + `workflow.step` spans |
 
-### Include confinement
+### 7.1 Include confinement
 
 Two separate boundaries, deliberately:
 
@@ -296,6 +300,20 @@ weftly server --dir ./workflows --include-root .
 Rules: paths resolve relative to the *including file*; absolute paths
 and URLs rejected; symlinks resolved *before* the confinement check;
 `..` allowed only while the result stays under the root.
+
+### 7.2 Other boundaries
+
+| Control | Status | Behaviour |
+|---|---|---|
+| `type: path` input confinement | ✅ | Resolved against the run workspace, then required to sit under the workspace **or** the workflow's own tree. The returned path is built by re-anchoring a verified-relative remainder onto the matched root, not by carrying the caller's string forward |
+| `must_exist:` probing | ✅ | Runs through `os.Root`, which constrains every operation to the opened directory **in the kernel** — traversal and symlink escape are unrepresentable, not merely rejected, so the check holds even if the surrounding logic were wrong |
+| `template dest:` / `upload path:` | ✅ | `workspace.SafeJoin` |
+| Secret masking | ✅ | Applied at the event boundary; recurses into maps and slices |
+| Secret constraint errors | ✅ | Report the constraint only — never the value, and never a did-you-mean, which would leak a credential a character at a time |
+| Presets may not carry secrets | ✅ | Compile-time error; presets are committed YAML exposed via `GET /workflows/{id}` |
+| `library: true` | ✅ | Include-only fragments are unlistable, unrunnable, and unschedulable |
+| Bounded suggestion matching | ✅ | `did-you-mean` skips values over 128 bytes and pre-filters on length difference, so a caller can't spend CPU on an O(n·m) comparison |
+| Catalogue-only execution | ✅ | Arbitrary submitted YAML is never runnable |
 
 ---
 

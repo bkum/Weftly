@@ -8,11 +8,10 @@ Weftly turns those procedures into versioned YAML files that stream live
 logs, emit a summary + HTML report, and exit with a status code. It is
 deliberately **not** a CI/CD replacement (see `spec.md` §2).
 
-Phase 1 ships the CLI core: schema + validate, expression engine, event
-bus + TTY renderer, filesystem run-state, and the built-in actions
-`run`, `http`, `template`, `assert`, `summary`, `upload`. A `prompt`
-stub reserves the action name; DAG parallelism, `--resume`, and the
-optional server + UI (`spec.md` §15) are Phase 2.
+The CLI, the DAG scheduler, workflow composition (`include:`), typed
+inputs, and the REST + SSE + UI server all ship today. See
+[docs/FEATURES.md](docs/FEATURES.md) for the complete verified feature
+record — including an explicit list of what is **not** implemented.
 
 ## Install / build
 
@@ -199,6 +198,23 @@ Helpers registered by weftly: `default(v, fb)`, `fromJSON(s)`,
   input resolution; never written to `state.json` in the clear.
 - **Path traversal is rejected** for `template dest:` and `upload path:`
   — both resolved via `workspace.SafeJoin`.
+- **`type: path` inputs are confined** to the run workspace or the
+  workflow's own directory tree. `must_exist:` probes through
+  `os.Root`, so the check cannot traverse or follow a symlink out of
+  the permitted root even if the surrounding logic were wrong.
+- **Step-level `include:` is confined** to `--include-root` (defaulting
+  to `--dir`); symlinks are resolved before the containment test, and
+  absolute paths and URLs are rejected outright.
+- **`library: true` fragments are not runnable** — excluded from the
+  catalogue, rejected as a `POST /runs` target, and rejected when a
+  schedule names them, so an include-only fragment can't be triggered
+  directly by a principal holding `workflows: "*"`.
+- **Presets may not carry secrets.** A preset supplying a
+  `secret: true` input is a compile-time error — presets are committed
+  YAML exposed through `GET /workflows/{id}`.
+- **Constraint errors on a secret never echo the value**, and suppress
+  the did-you-mean suggestion, which would otherwise leak a credential
+  a character at a time.
 
 ## CLI
 
@@ -215,9 +231,22 @@ weftly run <workflow.yml> [flags]      Execute a workflow (default verb)
   -p, --parallel N       max concurrent steps (default 4; needs edges honored)
       --resume <run-id>  resume a prior run; skips successful steps and
                          replays their outputs into downstream steps
+  --preset <name>        apply a named preset from `presets:` (--input wins)
+  --ci                   GitHub-Actions ::group:: markers, no colour
+  --otel-endpoint <url>  OTLP/HTTP endpoint; exports run + step spans
 
 weftly validate <workflow.yml>         Static validation, no execution
+weftly describe <workflow.yml>         Print inputs (type, constraints,
+                                       default, required/secret) and presets
 weftly list                            Discover workflows in ./workflows
+weftly init [name]                     Scaffold a starter workflow
+  -o, --out <path>       write to a path instead of stdout
+weftly fmt <workflow.yml>              Canonical formatting (idempotent)
+  -w, --write            rewrite the file in place
+  -d, --diff             print a diff instead; suppresses stdout / --write
+weftly diff <a.yml> <b.yml>            Structural diff; non-zero on difference
+weftly mcp                             Serve the catalogue over the Model
+                                       Context Protocol on stdio
 weftly import-gha <path-or-->          Convert a GitHub Actions workflow to
                                        weftly YAML (skips uses:, matrix:, etc.
                                        with a note per dropped construct)
@@ -236,6 +265,8 @@ weftly server                          Start the REST + SSE + UI server
   --s3-endpoint / --s3-bucket / --s3-prefix / --s3-region
   --s3-access-key / --s3-secret-key      mirror artifacts to S3-compatible store
   --s3-plaintext                          talk http to the S3 endpoint (dev-only)
+  --audit-file <path>    append-only JSON-lines log of mutating requests
+  --otel-endpoint <url>  OTLP/HTTP endpoint; exports run + step spans
 weftly version
 ```
 
