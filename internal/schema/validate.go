@@ -56,6 +56,7 @@ func Validate(wf *Workflow) error {
 		errs = append(errs, Error{Path: "name", Message: "required"})
 	}
 	errs = append(errs, validateInputs(wf)...)
+	errs = append(errs, ValidateInputSchema(wf)...)
 	errs = append(errs, validateSteps(wf)...)
 	if len(errs) == 0 {
 		return nil
@@ -69,11 +70,7 @@ func validateInputs(wf *Workflow) Errors {
 		if !idPattern.MatchString(name) {
 			errs = append(errs, Error{Path: "inputs." + name, Message: "name must match [a-z0-9_-]+"})
 		}
-		switch in.Type {
-		case "", InputString, InputNumber, InputBool:
-		default:
-			errs = append(errs, Error{Path: "inputs." + name + ".type", Message: fmt.Sprintf("unknown type %q", in.Type)})
-		}
+		_ = in // type + constraint checks live in ValidateInputSchema
 	}
 	return errs
 }

@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/expr-lang/expr"
 	"github.com/expr-lang/expr/vm"
@@ -400,6 +401,11 @@ func stringify(v any) string {
 		return "false"
 	case []byte:
 		return string(x)
+	case time.Duration:
+		// A duration is an int64 underneath, so the JSON fallback below
+		// would render `30s` as "30000000000". Emit the canonical form
+		// an operator wrote and a shell script expects.
+		return x.String()
 	default:
 		// Fall back to JSON for structured values so that a map/slice doesn't
 		// render as "map[a:1]" in a URL or a header.

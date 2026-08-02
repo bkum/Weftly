@@ -179,7 +179,7 @@ func (s *Server) initScheduler() error {
 			}
 			return "", fmt.Errorf("scheduled workflow %q not in catalogue", wf)
 		}
-		rec, err := s.runs.start(ctx, wf, entry.Workflow, inputs)
+		rec, err := s.runs.start(ctx, wf, entry.Workflow, inputs, "")
 		if err != nil {
 			return "", err
 		}

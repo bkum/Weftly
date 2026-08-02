@@ -115,6 +115,31 @@ step id (`resolve-id`) parses as subtraction inside an expression
 | `notify`   | POSTs a Slack-shaped or fully custom payload to a webhook. Non-2xx fails the step. |
 | `include`  | Calls another workflow as a step, passing inputs via `with:` / `with_if_set:` and consuming its declared `outputs:`. See [docs/FEATURES.md](docs/FEATURES.md#4-workflow-composition-include). |
 
+### Typed inputs and presets
+
+```yaml
+inputs:
+  domain: { type: enum, values: [retail, healthcare], default: retail }
+  cases:  { type: int, min: 100, max: 50000, default: 2500 }
+  token:  { type: string, secret: true, min_length: 20 }
+
+presets:
+  qa_exceptions:
+    description: Small corpus weighted toward error paths
+    values: { domain: healthcare, cases: 500 }
+```
+
+Types: `string` (the default when `type:` is omitted), `int`, `number`,
+`bool`, `enum`, `duration`, `json`, `path`, `list`. Coercion is strict —
+`3.0` is not an `int`. Every bad field in one submission is reported
+together, and an enum near-miss gets a did-you-mean.
+
+A constraint violation on a `secret:` input reports the constraint and
+never the value.
+
+`weftly describe <workflow.yml>` prints the whole contract. Apply a
+preset with `--preset <name>`; `--input` still wins over it.
+
 ### Teardown
 
 `cleanup:` is **run-level** — it fires once after the whole graph,

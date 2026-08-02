@@ -224,3 +224,30 @@ a:hover { text-decoration: underline; }
   background: var(--bg-panel);
 }
 .wf-history-item .id { font-family: var(--font-mono); font-size: 12.5px; color: var(--fg-muted); }
+
+/* Preset buttons above the run form. A preset is a compile-time
+   validated bundle, so clicking one can only produce a combination the
+   author already reviewed. */
+.wf-presets {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.wf-preset-btn {
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}
+.wf-preset-btn:hover { border-color: var(--accent); }
+.wf-preset-btn.active {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}

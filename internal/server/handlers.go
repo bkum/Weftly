@@ -15,6 +15,7 @@ import (
 
 	"github.com/bkum/weftly/internal/artifacts"
 	"github.com/bkum/weftly/internal/events"
+	"github.com/bkum/weftly/internal/schema"
 	"github.com/bkum/weftly/internal/state"
 	"github.com/bkum/weftly/internal/workspace"
 )
@@ -124,6 +125,10 @@ func (s *Server) runVisibleTo(runID string, p Principal) bool {
 type createRunReq struct {
 	Workflow string         `json:"workflow"`
 	Inputs   map[string]any `json:"inputs"`
+	// Preset names a bundle from the workflow's `presets:` map. Its
+	// values sit below `inputs` in precedence, so a client can apply a
+	// preset and override one field.
+	Preset string `json:"preset,omitempty"`
 }
 
 type createRunResp struct {
@@ -159,8 +164,20 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "workflow not accessible to this principal")
 		return
 	}
-	rec, err := s.runs.start(r.Context(), req.Workflow, entry.Workflow, req.Inputs)
+	rec, err := s.runs.start(r.Context(), req.Workflow, entry.Workflow, req.Inputs, req.Preset)
 	if err != nil {
+		// A bad input value is the CALLER's problem, not the server's.
+		// Return 400 with the per-field list so the SPA can render each
+		// error against its own form control instead of showing an
+		// opaque 500.
+		var ierrs schema.InputErrors
+		if errors.As(err, &ierrs) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error":        "input validation failed",
+				"input_errors": ierrs,
+			})
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

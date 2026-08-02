@@ -63,6 +63,10 @@ type Options struct {
 	// Server mode wires the server's logger here; CLI leaves it nil.
 	Logger *slog.Logger
 
+	// Preset names a bundle from the workflow's `presets:` map whose
+	// values sit below --input in precedence. Empty means none.
+	Preset string
+
 	// CatalogueRoot confines step-level `include:` resolution: an
 	// included path that resolves outside this directory is a
 	// compile-time error. Empty in CLI mode where the trust boundary
@@ -129,7 +133,13 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 	}
 
 	// Merge inputs (flag values) with declared defaults; coerce/validate.
-	inputs, secretVals, err := resolveInputs(wf, opts.Inputs)
+	inputs, secretVals, err := resolveInputs(wf, ResolveOptions{
+		Supplied:     opts.Inputs,
+		Preset:       opts.Preset,
+		WorkflowDir:  filepath.Dir(wf.Path),
+		WorkspaceDir: ws.StepsDir,
+		RunID:        runID,
+	})
 	if err != nil {
 		return Result{}, err
 	}

@@ -17,8 +17,61 @@ package that implements it so a reader can go straight to the code.
 | Compile to IR | ✅ | Workflow → topologically-schedulable `[]StepNode` | `internal/compile`, `internal/ir` |
 | Step ids | ✅ | Must match `[a-z0-9_]+`. **Underscores only — hyphens are rejected** because `resolve-id` parses as subtraction inside an expression | `internal/schema/validate.go` |
 | `requires:` preflight | ✅ | Named host tools checked on `PATH` before any step runs | `internal/engine` |
+| Typed inputs | ✅ | `string`/`int`/`number`/`bool`/`enum`/`duration`/`json`/`path`/`list` with constraints — see §1.1 | `internal/schema/inputs.go` |
+| `presets:` | ✅ | Named, compile-time-validated bundles of input values | `internal/schema/inputs.go` |
 | `library: true` | ✅ | Marks a fragment that may only be *included*, never run directly. Excluded from `GET /workflows`, rejected by `POST /runs` and at schedule-load time. An authorisation control, not presentation | `internal/server/catalogue.go` |
 | `finally:` | ✅ | Scope teardown belonging to the workflow that declares it — see §5 | `internal/compile`, `internal/engine/scheduler.go` |
+
+### 1.1 Input types and constraints
+
+`type:` omitted means `string`, so every workflow written before the type
+system keeps its meaning.
+
+| Type | Constraints | Notes |
+|---|---|---|
+| `string` | `pattern`, `min_length`, `max_length` | Default |
+| `int` | `min`, `max` | Strict — rejects `3.0`, `3abc`, `1e3` |
+| `number` | `min`, `max` | Float |
+| `bool` | — | `true/false`, `1/0`, `yes/no`, `on/off` |
+| `enum` | `values` (required) | Exact match; near-misses get a did-you-mean |
+| `duration` | `min`, `max` | Go syntax (`30s`, `5m`, `1h30m`) |
+| `json` | — | Parsed to a real object in expressions |
+| `path` | `must_exist` | Fails at resolution, not at the step that opens the file |
+| `list` | `items`, `min_items`, `max_items` | JSON array, or comma-separated on the CLI |
+
+`secret:` is a **flag, not a type** — a secret can be a constrained
+string, a path, or anything else. A constraint violation on a secret
+reports the constraint and **never the value**, with no did-you-mean and
+no allowed-value list: the suggestion would leak the credential a
+character at a time.
+
+Defaults may be expressions referencing other inputs, `env.*`, `run.*`,
+`workflow.dir`, and `workspace.dir` — but not `steps.*`, since inputs
+resolve before any step runs. Inputs are resolved in dependency order;
+reference cycles are a compile-time error.
+
+Values are coerced **before** constraint checks, and every failure in one
+resolution is reported together rather than one per run attempt.
+
+**Precedence**, lowest to highest: `default:` → preset → `WEFTLY_INPUT_*`
+env → supplied (`--input` / `--input-file` / API `inputs`).
+
+### 1.2 Presets
+
+```yaml
+presets:
+  qa_exceptions:
+    description: Small corpus weighted toward error paths
+    values: { domain: retail, cases: 500 }
+```
+
+Validated at `weftly validate` time: every key must name a declared
+input, every value must coerce and satisfy that input's constraints, and
+**no preset may supply a `secret: true` input** — presets live in
+committed YAML that `GET /workflows/{id}` exposes, so that would be a
+credential in version control.
+
+Only one preset per run. No inheritance (`extends:`) — deliberately.
 
 ### Step modifiers
 
@@ -189,6 +242,7 @@ full. Fine for idempotent bodies, wasteful otherwise.
 | `weftly import-gha <file>` | ✅ | Convert a GitHub Actions workflow |
 | `weftly mcp` | ✅ | Model Context Protocol server over stdio |
 | `weftly version` | ✅ | Version / commit / build date |
+| `weftly describe` | ✅ | Print inputs with types, constraints, defaults, and presets |
 | `weftly schema` | ❌ | JSON Schema emission |
 | `weftly docs` | ❌ | Generate workflow documentation |
 | `weftly test` | ❌ | Workflow unit-test harness |
@@ -197,7 +251,7 @@ full. Fine for idempotent bodies, wasteful otherwise.
 
 `--input k=v` · `--input-file` · `--var k=v` · `--dry-run` · `--json` ·
 `--no-color` · `--strict` · `--yes` · `--parallel N` · `--resume` ·
-`--ci` · `--otel-endpoint`
+`--ci` · `--preset` · `--otel-endpoint`
 
 `--dry-run` prints the **expanded** plan with qualified ids, so an
 include's children are visible before anything executes.
@@ -276,8 +330,9 @@ Tracked so the gap is explicit rather than discovered.
 |---|---|
 | `type: path` outputs | Path outputs crossing an include boundary are not rebased automatically |
 | `$WEFTLY_OUTPUT_JSON` / `outputs_from:` | `Outputs` is already `map[string]any`, but a `run` step can only emit `key=value` strings |
-| Typed input constraints | `enum` ships; `int` / `min` / `max` / `pattern` do not |
-| `presets:` | No named input bundles, and no SPA affordance for them |
+| `prompt` type-driven selection | An unresolved typed input could pick its own prompt shape (`enum` → select, `bool` → confirm); today the workflow must declare the prompt |
+| `schedules.yaml` input validation at load | A schedule with a bad input value fails at fire time, not at load |
+| `import-gha` input translation | GHA `type: choice`/`boolean`/`number` are still flattened to strings |
 | Per-iteration `for-each` resume | See §5 |
 | `weftly schema` / `docs` / `test` | Adoption tooling |
 | Run diffing | `weftly diff` compares *workflows*; comparing two *runs* is not implemented |

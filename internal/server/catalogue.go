@@ -18,7 +18,12 @@ type catalogueEntry struct {
 	Description string                  `json:"description,omitempty"`
 	Path        string                  `json:"-"` // never surfaced to clients
 	Inputs      map[string]schema.Input `json:"inputs,omitempty"`
-	Workflow    *schema.Workflow        `json:"-"` // for run dispatch
+	// Presets are surfaced so the SPA can render a row of preset
+	// buttons above the form. Safe to expose: ValidateInputSchema
+	// rejects any preset that supplies a secret input, so a preset can
+	// never carry a credential.
+	Presets  map[string]schema.Preset `json:"presets,omitempty"`
+	Workflow *schema.Workflow         `json:"-"` // for run dispatch
 	// Library fragments are loaded (so includes and diagnostics work) but
 	// are neither listed nor runnable. Never surfaced to clients — a
 	// client should not be able to enumerate what it cannot run.
@@ -63,6 +68,7 @@ func loadCatalogue(dir string) (*catalogue, error) {
 			Path:        path,
 			Inputs:      wf.Inputs,
 			Workflow:    wf,
+			Presets:     wf.Presets,
 			Library:     wf.Library,
 		}
 	}

@@ -37,7 +37,55 @@ type Input struct {
 	// Enum, when non-empty, restricts the input to one of the listed
 	// values. Renders as a picklist in the SPA and is validated at
 	// input-resolution time.
+	//
+	// `enum:` predates the type system and stays supported. New
+	// workflows should prefer `type: enum` with `values:`; both are
+	// read through Input.AllowedValues.
 	Enum []any `yaml:"enum" json:"enum,omitempty"`
+
+	// --- type constraints (see docs/FEATURES.md §1) -------------------
+	//
+	// All are nil/zero when unconstrained. Pointer types distinguish
+	// "not declared" from "declared as zero" — `min: 0` is a real
+	// constraint, and a plain int64 could not express it.
+
+	// Values is the allowed set for `type: enum` (and for `items: enum`
+	// inside a list).
+	Values []string `yaml:"values" json:"values,omitempty"`
+	// Items is the element type for `type: list`.
+	Items InputType `yaml:"items" json:"items,omitempty"`
+	// Min / Max bound int, number, and duration inputs. For duration
+	// they are nanosecond counts, parsed from the YAML duration form.
+	Min *float64 `yaml:"-" json:"min,omitempty"`
+	Max *float64 `yaml:"-" json:"max,omitempty"`
+	// MinLen / MaxLen bound string length.
+	MinLen *int `yaml:"min_length" json:"min_length,omitempty"`
+	MaxLen *int `yaml:"max_length" json:"max_length,omitempty"`
+	// MinItems / MaxItems bound list length.
+	MinItems *int `yaml:"min_items" json:"min_items,omitempty"`
+	MaxItems *int `yaml:"max_items" json:"max_items,omitempty"`
+	// Pattern is a Go regexp a string input must match.
+	Pattern string `yaml:"pattern" json:"pattern,omitempty"`
+	// MustExist makes a `type: path` input fail at resolution when the
+	// file is absent, rather than at the step that opens it.
+	MustExist bool `yaml:"must_exist" json:"must_exist,omitempty"`
+
+	// HasDefault distinguishes "no default" from "default: null", and
+	// more importantly from `default: false` / `default: 0`, which are
+	// meaningful values a zero-check would discard. Set by
+	// UnmarshalYAML.
+	HasDefault bool `yaml:"-" json:"-"`
+
+	// rawMin / rawMax capture the YAML scalar before type-aware
+	// conversion — `max: 10m` on a duration and `max: 50000` on an int
+	// are both valid and need different parsing, which isn't known
+	// until the type is read.
+	rawMin string `yaml:"-"`
+	rawMax string `yaml:"-"`
+
+	// Line is the source line of this input's declaration, for the
+	// "declared at file:line" tail on input errors.
+	Line int `yaml:"-" json:"-"`
 }
 
 // HTTPDefaults holds workflow-level defaults merged into every http step.
@@ -81,6 +129,12 @@ type Workflow struct {
 	// schedulable — even though it was written to run only as part of a
 	// caller that supplies its inputs.
 	Library bool `yaml:"library"`
+	// Presets are named bundles of input values, validated against the
+	// input schema at compile time. A preset may not supply a value for
+	// a `secret: true` input — presets live in committed YAML readable
+	// through GET /workflows/{id}, so that would be a credential in
+	// version control.
+	Presets map[string]Preset `yaml:"presets" json:"presets,omitempty"`
 	// Outputs is the top-level output contract of the workflow, evaluated
 	// in the workflow's own scope after its steps have run. When this
 	// workflow is used as a step-level include, the parent references

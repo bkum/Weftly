@@ -114,6 +114,58 @@ complete current feature record.
   and schedulable, despite being written to run only as part of a
   caller that supplies its inputs.
 
+### Added — typed inputs and presets
+
+- **Input type system.** `string` (default), `int`, `number`, `bool`,
+  `enum`, `duration`, `json`, `path`, `list`, with constraints:
+  `pattern` / `min_length` / `max_length` on strings, `min` / `max` on
+  numerics and durations, `values` on enums, `items` / `min_items` /
+  `max_items` on lists, `must_exist` on paths. Omitting `type:` means
+  `string`, so every existing workflow is unchanged.
+
+  Coercion is strict: `3.0` is not an `int`. Silent truncation is how
+  `cases: 2500.7` becomes 2500 and someone loses an afternoon.
+
+- **All input errors reported at once.** A form with three bad fields
+  produces three errors in one report rather than forcing three round
+  trips. Enum near-misses get a Levenshtein did-you-mean plus the full
+  value list.
+
+- **Secrets never echo their value.** A constraint violation on a
+  `secret: true` input reports the constraint and nothing else — no
+  value, no did-you-mean, no allowed-value list, since a suggestion
+  leaks the credential a character at a time. `secret:` stays a flag
+  rather than a type, so a secret can be a constrained string, a path,
+  or anything else.
+
+- **Expression defaults.** A default may reference other inputs,
+  `env.*`, `run.*`, `workflow.dir`, and `workspace.dir` — but not
+  `steps.*`, since inputs resolve before any step runs. Inputs resolve
+  in dependency order; reference cycles are a compile-time error. A
+  supplied value never triggers its own default's evaluation.
+
+- **`presets:`.** Named bundles of input values, validated at
+  `weftly validate` time: every key must name a declared input and every
+  value must satisfy that input's constraints, so `domain: retial` fails
+  in review rather than in front of a customer. **A preset may not
+  supply a `secret: true` input** — presets live in committed YAML that
+  `GET /workflows/{id}` exposes, so that would be a credential in
+  version control. Applied with `--preset` or `POST /runs {"preset":...}`;
+  `--input` still wins. One preset per run, no inheritance.
+
+- **`weftly describe`.** Prints a workflow's inputs with type,
+  constraints, default, and required/secret flags, plus its presets —
+  the thing to run before writing `--input` flags.
+
+- **`POST /runs` returns 400, not 500, for a bad input**, with a
+  structured per-field error list the SPA can render against the
+  offending control.
+
+- **SPA typed controls.** `enum` → dropdown, `int`/`number` with bounds →
+  bounded number field, `bool` → toggle, `duration` and `list` → format
+  hints, `pattern` / length → native inline validation. Presets render
+  as a row of buttons above the form that populate it.
+
 ### Fixed
 
 - **Release archives were missing `workflows/` and `examples/`.**
