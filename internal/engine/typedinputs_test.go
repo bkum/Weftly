@@ -3,6 +3,7 @@ package engine
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -248,5 +249,50 @@ steps: [{id: s, run: echo}]`)
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("resolving a 1 MiB enum value took too long — suggestion work is unbounded")
+	}
+}
+
+// TestPathConfinementThroughSymlinkedRoot reproduces the macOS layout
+// on any platform: there, every temp dir lives under /var/... which is
+// a symlink to /private/var/..., so the canonical form of a root and
+// the lexical form of a path built from it disagree.
+//
+// This bit twice — once in the include-confinement check and again
+// here — because a path whose leaf does not exist yet cannot be
+// EvalSymlinks'd at all, so it stays lexical while the roots are
+// canonical and filepath.Rel sees two unrelated trees.
+func TestPathConfinementThroughSymlinkedRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs elevation on windows")
+	}
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	wf := mustParse(t, `
+name: t
+inputs:
+  p: { type: path }
+steps: [{id: s, run: echo}]`)
+
+	// Workspace given via the SYMLINK; the path resolves through it to
+	// the real directory. Both must be seen as the same tree.
+	out, _, err := resolveInputs(wf, ResolveOptions{
+		Supplied: map[string]any{"p": "out/report.html"}, WorkspaceDir: link, WorkflowDir: link,
+	})
+	if err != nil {
+		t.Fatalf("a path under a symlinked workspace must be allowed: %v", err)
+	}
+	got := out["p"].(string)
+	if !strings.HasSuffix(got, filepath.Join("out", "report.html")) {
+		t.Errorf("unexpected resolved path %q", got)
+	}
+
+	// The confinement itself must still hold through the symlink.
+	if _, _, err := resolveInputs(wf, ResolveOptions{
+		Supplied: map[string]any{"p": "../../../etc/passwd"}, WorkspaceDir: link, WorkflowDir: link,
+	}); err == nil {
+		t.Error("traversal out of a symlinked root must still be rejected")
 	}
 }

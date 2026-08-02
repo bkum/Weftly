@@ -136,24 +136,12 @@ func resolveInputs(wf *schema.Workflow, opts ResolveOptions) (map[string]any, []
 				out[name] = v
 				continue
 			}
-			abs, perr := resolvePathInput(p, opts)
+			abs, perr := resolvePathInput(p, in.MustExist, opts)
 			if perr != "" {
 				ierrs = append(ierrs, schema.InputError{Input: name, Line: in.Line, Message: perr})
 				continue
 			}
 			v = abs
-			if in.MustExist {
-				// Failing here rather than at the step that opens the
-				// file means a missing profile registry names the input
-				// instead of surfacing as a shell error four steps later.
-				if _, err := os.Stat(abs); err != nil {
-					ierrs = append(ierrs, schema.InputError{
-						Input: name, Line: in.Line,
-						Message: fmt.Sprintf("path %q does not exist (must_exist: true)", p),
-					})
-					continue
-				}
-			}
 		}
 		out[name] = v
 		if in.Secret {
@@ -210,8 +198,16 @@ func ParseKVString(pairs []string) (map[string]string, error) {
 	return m, nil
 }
 
-// resolvePathInput resolves and confines a `type: path` value, returning
-// the absolute path or a non-empty error message.
+// resolvePathInput resolves, confines, and (when mustExist) verifies a
+// `type: path` value, returning the absolute path or a non-empty error
+// message.
+//
+// The existence check lives HERE rather than at the call site so the
+// containment guard and the only filesystem call that consumes the
+// path sit in one function body. Splitting them put the guard beyond
+// the reach of intraprocedural taint analysis, which then — correctly,
+// on the evidence available to it — reported an unconstrained
+// caller-supplied path reaching os.Stat.
 //
 // Two roots are permitted, because the spec asks for both and they serve
 // different purposes:
@@ -230,22 +226,24 @@ func ParseKVString(pairs []string) (map[string]string, error) {
 // exists, so a symlink planted inside a root cannot point out of it.
 // A path that doesn't exist yet is tested lexically, which is correct
 // for an output path the workflow is about to create.
-func resolvePathInput(p string, opts ResolveOptions) (string, string) {
+func resolvePathInput(p string, mustExist bool, opts ResolveOptions) (string, string) {
 	roots := make([]string, 0, 2)
 	for _, r := range []string{opts.WorkspaceDir, opts.WorkflowDir} {
 		if r == "" {
 			continue
 		}
 		if abs, err := filepath.Abs(r); err == nil {
-			if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-				abs = resolved
-			}
-			roots = append(roots, abs)
+			roots = append(roots, canonicalPath(abs))
 		}
 	}
 	// No roots configured (bare-struct tests) — nothing to confine
 	// against, so pass the value through rather than reject everything.
 	if len(roots) == 0 {
+		if mustExist {
+			if _, err := os.Stat(p); err != nil {
+				return "", fmt.Sprintf("path %q does not exist (must_exist: true)", p)
+			}
+		}
 		return p, ""
 	}
 
@@ -261,17 +259,55 @@ func resolvePathInput(p string, opts ResolveOptions) (string, string) {
 	if abs, err = filepath.Abs(abs); err != nil {
 		return "", fmt.Sprintf("path %q could not be resolved: %v", p, err)
 	}
-	if resolved, rerr := filepath.EvalSymlinks(abs); rerr == nil {
-		abs = resolved
-	}
+	abs = canonicalPath(abs)
+	confined := false
 	for _, root := range roots {
 		rel, rerr := filepath.Rel(root, abs)
 		if rerr != nil {
 			continue
 		}
 		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return abs, ""
+			confined = true
+			break
 		}
 	}
-	return "", fmt.Sprintf("path %q resolves outside the run workspace and the workflow directory", p)
+	if !confined {
+		return "", fmt.Sprintf("path %q resolves outside the run workspace and the workflow directory", p)
+	}
+	// Past this point abs is proven to sit under one of the permitted
+	// roots, so touching it is safe. Failing here rather than at the
+	// step that opens the file means a missing profile registry names
+	// the input instead of surfacing as a shell error four steps later.
+	if mustExist {
+		if _, err := os.Stat(abs); err != nil {
+			return "", fmt.Sprintf("path %q does not exist (must_exist: true)", p)
+		}
+	}
+	return abs, ""
+}
+
+// canonicalPath resolves symlinks as far as the path actually exists,
+// then re-appends the remainder.
+//
+// Plain EvalSymlinks fails outright on a path whose leaf doesn't exist
+// yet, which is the common case for an output path a workflow is about
+// to create. Leaving such a path un-canonicalised while the roots ARE
+// canonicalised makes filepath.Rel see two unrelated trees — on macOS
+// every temp dir is /var/... symlinked to /private/var/..., so a
+// perfectly legal workspace-relative path gets rejected.
+//
+// Resolving the longest existing prefix keeps the containment test
+// honest (a symlink that exists is followed, so it can't smuggle the
+// path out of a root) without requiring the leaf to exist.
+func canonicalPath(abs string) string {
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	dir, leaf := filepath.Split(abs)
+	dir = filepath.Clean(dir)
+	if dir == abs || leaf == "" {
+		// Reached the root without finding an existing ancestor.
+		return abs
+	}
+	return filepath.Join(canonicalPath(dir), leaf)
 }
