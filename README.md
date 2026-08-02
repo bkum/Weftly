@@ -242,6 +242,8 @@ weftly list                            Discover workflows in ./workflows
 weftly init [name]                     Scaffold a starter workflow
   -o, --out <path>       write to a path instead of stdout
 weftly fmt <workflow.yml>              Canonical formatting (idempotent)
+  -w, --write            rewrite the file in place
+  -d, --diff             print a diff instead; suppresses stdout / --write
 weftly diff <a.yml> <b.yml>            Structural diff; non-zero on difference
 weftly mcp                             Serve the catalogue over the Model
                                        Context Protocol on stdio
