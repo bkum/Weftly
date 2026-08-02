@@ -33,6 +33,7 @@ func newRunCmd() *cobra.Command {
 		parallel     int
 		resume       string
 		ciMode       bool
+		preset       string
 		otelEndpoint string
 	)
 	cmd := &cobra.Command{
@@ -136,6 +137,7 @@ func newRunCmd() *cobra.Command {
 				Parallel: parallel,
 				Resume:   resume,
 				Inputs:   supplied,
+				Preset:   preset,
 				Vars:     varOverrides,
 				Bus:      bus,
 			})
@@ -162,6 +164,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().IntVarP(&parallel, "parallel", "p", 4, "maximum concurrent steps (needs edges are always honored)")
 	cmd.Flags().StringVar(&resume, "resume", "", "resume a prior run by id (or state.json path); skips successful steps")
 	cmd.Flags().BoolVar(&ciMode, "ci", false, "CI-friendly output: no color, GitHub Actions style ::group::/::endgroup:: markers around each step")
+	cmd.Flags().StringVar(&preset, "preset", "", "apply a named preset from the workflow's `presets:` map (--input still wins)")
 	cmd.Flags().StringVar(&otelEndpoint, "otel-endpoint", "", "OTLP/HTTP endpoint (e.g. http://collector:4318); enables per-run + per-step span export")
 	return cmd
 }

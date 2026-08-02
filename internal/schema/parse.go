@@ -117,6 +117,9 @@ func Parse(r io.Reader) (*Workflow, error) {
 	if err := decodeStepSequence(&root, "cleanup", wf.Cleanup); err != nil {
 		return nil, err
 	}
+	if err := decodeStepSequence(&root, "finally", wf.Finally); err != nil {
+		return nil, err
+	}
 	return &wf, nil
 }
 

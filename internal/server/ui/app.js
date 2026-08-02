@@ -125,12 +125,50 @@ async function renderForm(id) {
   const inputs = wf.inputs || {};
   const entries = Object.entries(inputs);
   const values = {};
+  // controls maps input name -> its DOM control, so a preset click can
+  // repopulate the visible form rather than only the values object.
+  const controls = {};
+
+  // Preset buttons sit above the form. A preset is a named bundle the
+  // workflow author validated at compile time, so clicking one can only
+  // produce a combination that already passed validation — which is the
+  // point for an operator who doesn't know the input vocabulary.
+  const presets = wf.presets || {};
+  const presetNames = Object.keys(presets).sort();
+  if (presetNames.length) {
+    const bar = document.createElement("div");
+    bar.className = "wf-presets";
+    const lbl = document.createElement("span");
+    lbl.className = "wf-sub";
+    lbl.textContent = "Presets:";
+    bar.appendChild(lbl);
+    for (const pn of presetNames) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "wf-preset-btn";
+      btn.textContent = pn;
+      if (presets[pn].description) btn.title = presets[pn].description;
+      btn.addEventListener("click", () => {
+        for (const [k, v] of Object.entries(presets[pn].values || {})) {
+          values[k] = v;
+          if (controls[k]) controls[k].value = String(v);
+        }
+        bar.querySelectorAll(".wf-preset-btn").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+      });
+      bar.appendChild(btn);
+    }
+    fields.parentNode.insertBefore(bar, fields);
+  }
   for (const [name, spec] of entries) {
     const wrap = document.createElement("div");
     wrap.className = "wf-field";
     // A long description or an enum picklist earns a full-row slot so
     // the help text wraps and the select isn't squeezed.
-    if ((spec.description && spec.description.length > 60) || (spec.enum && spec.enum.length > 4)) {
+    const choices = (Array.isArray(spec.values) && spec.values.length)
+      ? spec.values
+      : (Array.isArray(spec.enum) ? spec.enum : []);
+    if ((spec.description && spec.description.length > 60) || choices.length > 4) {
       wrap.classList.add("full");
     }
 
@@ -160,7 +198,7 @@ async function renderForm(id) {
     wrap.appendChild(label);
 
     let input;
-    if (Array.isArray(spec.enum) && spec.enum.length > 0) {
+    if (choices.length > 0) {
       // Enum → picklist. Preserve the declared order; include a
       // blank "(default)" only when the input isn't required and no
       // explicit default was set.
@@ -173,7 +211,7 @@ async function renderForm(id) {
         o.textContent = "(default)";
         input.appendChild(o);
       }
-      for (const v of spec.enum) {
+      for (const v of choices) {
         const o = document.createElement("option");
         o.value = String(v);
         o.textContent = String(v);
@@ -188,14 +226,31 @@ async function renderForm(id) {
         o.textContent = opt || "(default)";
         input.appendChild(o);
       }
-    } else if (spec.type === "number") {
+    } else if (spec.type === "number" || spec.type === "int") {
       input = document.createElement("input");
       input.type = "number";
       input.className = "wf-input";
+      // Enforce the declared bounds client-side too. The server
+      // re-checks — this only saves a round trip and shows the limit
+      // in the native control.
+      if (spec.min !== undefined && spec.min !== null) input.min = spec.min;
+      if (spec.max !== undefined && spec.max !== null) input.max = spec.max;
+      if (spec.type === "int") input.step = "1";
     } else {
       input = document.createElement("input");
       input.type = spec.secret ? "password" : "text";
       input.className = "wf-input";
+      if (spec.type === "duration") {
+        input.placeholder = "e.g. 30s, 5m, 1h30m";
+      }
+      if (spec.type === "json" || spec.type === "list") {
+        input.placeholder = spec.type === "list" ? "a, b, c  (or a JSON array)" : "JSON";
+      }
+      // pattern / length constraints drive native validation so the
+      // field goes red before submit rather than after.
+      if (spec.pattern) input.pattern = spec.pattern;
+      if (spec.min_length !== undefined && spec.min_length !== null) input.minLength = spec.min_length;
+      if (spec.max_length !== undefined && spec.max_length !== null) input.maxLength = spec.max_length;
       // Show the default as a placeholder for secrets so the actual
       // value stays out of the DOM tree (screen shares, extensions).
       if (spec.secret && spec.default) {
@@ -212,6 +267,7 @@ async function renderForm(id) {
         input.value = String(spec.default);
       }
     }
+    controls[name] = input;
     input.addEventListener("input", (e) => (values[name] = e.target.value));
     input.addEventListener("change", (e) => (values[name] = e.target.value));
     wrap.appendChild(input);

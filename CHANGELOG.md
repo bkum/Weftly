@@ -7,6 +7,188 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Everything below shipped after 0.3.0 but was never written down — the
+distributed binary reached 0.5.0 while this file still ended at 0.3.0.
+Reconstructed from the source tree. See `docs/FEATURES.md` for the
+complete current feature record.
+
+### Added — Phase 4 (workflow expressiveness)
+
+- **`retry:` step modifier.** `attempts` (2–20), `delay`, `backoff`
+  (`""` constant / `linear` / `exponential`), and `on:` to choose which
+  terminal statuses retry (`failed`, `timed-out`). A `StepRetry` event
+  is emitted per attempt so renderers show the loop rather than a
+  mysteriously long-running step.
+- **Status functions.** `success()`, `failure()`, `always()`,
+  `cancelled()` in expressions, populated meaningfully during the
+  `cleanup:` pass.
+- **`cleanup:` blocks.** Run-level teardown that executes after the main
+  graph regardless of outcome, on a detached context so a cancelled run
+  still tears down.
+- **`for-each:` step modifier.** Expression → list; runs the step body
+  once per element with `each.value` / `each.index` in scope.
+- **`wait` action.** Poll until a condition holds or a budget expires.
+- **`parse` action.** Extract structure from text — JSON flattening and
+  regex named groups — into step outputs.
+- **`notify` action.** POST a Slack-shaped or fully custom payload to a
+  webhook; non-2xx is a step failure.
+- **Audit trail.** Append-only JSON-lines log of mutating requests
+  (`--audit-file`), with an in-memory tail at `GET /audit` (admin only).
+- **MCP mode.** `weftly mcp` serves the Model Context Protocol over
+  stdio (`initialize`, `tools/list`, `tools/call`), exposing a catalogue
+  as callable tools.
+- **CI mode.** `weftly run --ci` emits GitHub-Actions
+  `::group::` / `::endgroup::` markers so CI viewers collapse
+  successful steps.
+- **Adoption tooling.** `weftly init` scaffolds a valid starter
+  workflow; `weftly fmt` canonically formats (idempotent); `weftly diff`
+  structurally compares two workflows and exits non-zero on difference.
+- **OpenTelemetry tracing.** `--otel-endpoint` exports `workflow.run`
+  and `workflow.step` spans over OTLP/HTTP. No-op when unset.
+
+### Added — workflow composition
+
+- **Step-level `include:`.** One workflow calls another as a step,
+  passing inputs via `with:` and consuming the child's declared
+  top-level `outputs:` at `steps.<include-id>.outputs.*`. Expanded at
+  compile time into a flat DAG; the scheduler never learns composition
+  exists. Resolution is scope-based rather than string-rewriting, so
+  error messages and `--dry-run` plans always match the source file.
+- **`with_if_set:`.** Binds a child input only when the expression
+  resolves non-empty, leaving the child's own `default:` in force
+  otherwise. Fixes the case where a caller forwarding its own unset
+  optional input clobbers a sensible default with `""`.
+- **Workflow-level `outputs:`.** The declared output contract a
+  workflow exposes when included.
+- **`workflow.dir` and `workspace.dir` expression namespaces.**
+  `workflow.dir` is the directory of the YAML file that authored the
+  step (where the *code* lives — read-only, shared across runs);
+  `workspace.dir` is that step's working directory (where this run's
+  *data* goes — writable, per-scope). Input defaults are interpolated,
+  so a library can carry its own bundled assets via
+  `default: "${{ workflow.dir }}/profiles/x12.json"`.
+- **Per-scope workspaces.** Each include gets its own workspace
+  subdirectory, so the same fragment used twice in one run cannot
+  overwrite its own output. A caller that *wants* sharing passes
+  `${{ workspace.dir }}/…` through `with:` — evaluated in the caller's
+  scope, so both children cooperate on one directory.
+- **Scope-qualified artifacts.** Artifacts collected inside an include
+  are named `<scope>__<file>`, identically in the local artifacts
+  directory and in the S3 object key. Qualifying one tier but not the
+  other would separate siblings' artifacts on disk and re-collide them
+  in the bucket.
+- **`--include-root`.** Separates the *catalogue* boundary (`--dir`,
+  which workflows are runnable) from the *trust* boundary (which files
+  an include may reach). Defaults to `--dir`; widen it for projects
+  laying out `workflows/` and `lib/` as siblings.
+
+### Added — scope teardown and library fragments
+
+- **`finally:` — scope teardown.** Steps that run after *their own
+  workflow's* steps complete, whatever the outcome. Where `cleanup:` is
+  run-level and fires once at the very end, `finally:` belongs to the
+  workflow that declares it, so an included fragment can tear down just
+  what it created without knowing anything about its caller. Teardown
+  nodes are exempt from the scheduler's cascade-skip — that protection
+  is right for downstream work and exactly wrong for teardown, which
+  exists to run after failure. Nested fragments tear down
+  innermost-first.
+- **Scope-relative status functions.** Inside a step belonging to an
+  include, `success()` / `failure()` now report *that scope's*
+  aggregate status rather than the run's, so a fragment's `finally:`
+  can ask "did **my** steps succeed" instead of "did anything anywhere
+  fail". Top-level steps are unchanged. A `continue-on-error` failure
+  counts as `failure()` for this purpose: `continue-on-error` is about
+  run control flow, not about whether the work succeeded, and teardown
+  cares only about the latter.
+- **`library: true`.** Marks a fragment that may only be included,
+  never run on its own. Excluded from `GET /workflows` and
+  `GET /workflows/{id}`, rejected by `POST /runs`, and rejected at
+  schedule **load** time (not fire time — a schedule that only fails
+  when its cron next matches is a latent misconfiguration the operator
+  discovers hours later). Still freely includable.
+
+  This is an authorisation control rather than listing hygiene: without
+  it every fragment in a toolkit is an ordinary catalogue entry,
+  independently triggerable by any principal holding `workflows: "*"`
+  and schedulable, despite being written to run only as part of a
+  caller that supplies its inputs.
+
+### Added — typed inputs and presets
+
+- **Input type system.** `string` (default), `int`, `number`, `bool`,
+  `enum`, `duration`, `json`, `path`, `list`, with constraints:
+  `pattern` / `min_length` / `max_length` on strings, `min` / `max` on
+  numerics and durations, `values` on enums, `items` / `min_items` /
+  `max_items` on lists, `must_exist` on paths. Omitting `type:` means
+  `string`, so every existing workflow is unchanged.
+
+  Coercion is strict: `3.0` is not an `int`. Silent truncation is how
+  `cases: 2500.7` becomes 2500 and someone loses an afternoon.
+
+- **All input errors reported at once.** A form with three bad fields
+  produces three errors in one report rather than forcing three round
+  trips. Enum near-misses get a Levenshtein did-you-mean plus the full
+  value list.
+
+- **Secrets never echo their value.** A constraint violation on a
+  `secret: true` input reports the constraint and nothing else — no
+  value, no did-you-mean, no allowed-value list, since a suggestion
+  leaks the credential a character at a time. `secret:` stays a flag
+  rather than a type, so a secret can be a constrained string, a path,
+  or anything else.
+
+- **Expression defaults.** A default may reference other inputs,
+  `env.*`, `run.*`, `workflow.dir`, and `workspace.dir` — but not
+  `steps.*`, since inputs resolve before any step runs. Inputs resolve
+  in dependency order; reference cycles are a compile-time error. A
+  supplied value never triggers its own default's evaluation.
+
+- **`presets:`.** Named bundles of input values, validated at
+  `weftly validate` time: every key must name a declared input and every
+  value must satisfy that input's constraints, so `domain: retial` fails
+  in review rather than in front of a customer. **A preset may not
+  supply a `secret: true` input** — presets live in committed YAML that
+  `GET /workflows/{id}` exposes, so that would be a credential in
+  version control. Applied with `--preset` or `POST /runs {"preset":...}`;
+  `--input` still wins. One preset per run, no inheritance.
+
+- **`weftly describe`.** Prints a workflow's inputs with type,
+  constraints, default, and required/secret flags, plus its presets —
+  the thing to run before writing `--input` flags.
+
+- **`POST /runs` returns 400, not 500, for a bad input**, with a
+  structured per-field error list the SPA can render against the
+  offending control.
+
+- **SPA typed controls.** `enum` → dropdown, `int`/`number` with bounds →
+  bounded number field, `bool` → toggle, `duration` and `list` → format
+  hints, `pattern` / length → native inline validation. Presets render
+  as a row of buttons above the form that populate it.
+
+### Fixed
+
+- **Release archives were missing `workflows/` and `examples/`.**
+  GoReleaser v2's bare-string globs matched nothing for `workflows/**/*`
+  and warned rather than failing, so tarballs shipped with only the
+  binary. Switched to the structured `src:`/`dst:` form and added a CI
+  job that builds a snapshot, inspects the tarball, and runs the shipped
+  binary against the shipped workflow.
+- **Step errors were invisible in the SPA.** `StepFinished.Err` is a Go
+  `error` interface and marshalled as `{}`. Added `MarshalJSON` on
+  `StepFinished` and `StepRetry`, and taught the SPA to render it.
+- **SSE reconnects duplicated the log.** The server replayed the whole
+  event log on every reconnect. Added `id:` / `Last-Event-ID` dedupe and
+  closed the `EventSource` on `RunFinished`.
+- **Form fields lost their metadata.** `schema.Input` had only YAML
+  tags, so JSON marshalling emitted Go-cased names and the SPA silently
+  dropped `description` / `required` / `default` / `secret`. Added JSON
+  tags and `enum` picklist rendering.
+- **Windows release builds failed.** `syscall.Kill` and
+  `SysProcAttr.Setpgid` are POSIX-only; a runtime `GOOS` check doesn't
+  prevent compilation. Split into `run_unix.go` / `run_windows.go`.
+- Secret masking now recurses into `map[string]any` and `[]any`.
+
 ## [0.3.0] — 2026-07-23
 
 Phase 3: multi-tenant server. RBAC, run history, remote artifact store,

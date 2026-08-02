@@ -54,6 +54,11 @@ type StepNode struct {
 	// (a compile error in an included file names the child file, not
 	// the caller).
 	SourceFile string
+	// RunAlways marks a teardown node from a `finally:` block. The
+	// scheduler dispatches these even when an upstream step failed —
+	// the cascade-skip that protects ordinary downstream work is
+	// precisely wrong for teardown, which exists to run after failure.
+	RunAlways bool
 }
 
 // Scope is the compile-time surface every included step's expressions
@@ -92,6 +97,11 @@ type Binding struct {
 	Literal any    // literal default from the child's `inputs:`
 	IsExpr  bool
 	Secret  bool // child declared `secret: true`, or expression taints
+	// IfSet marks a binding that came from `with_if_set:` — when the
+	// expression evaluates empty, Fallback is used instead of the empty
+	// value, so the child keeps its own default.
+	IfSet    bool
+	Fallback any
 }
 
 // Graph is the execution plan.

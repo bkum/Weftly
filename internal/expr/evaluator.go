@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/expr-lang/expr"
 	"github.com/expr-lang/expr/vm"
@@ -72,6 +73,27 @@ type Env struct {
 	// `default: "${{ workflow.dir }}/../profiles.json"`) resolve
 	// against the file, not the run workspace.
 	WorkflowDir string
+	// WorkspaceDir is the absolute working directory of the step being
+	// evaluated — the run's shared workspace for a top-level step, or
+	// the scope's own subdirectory for a step inside an include.
+	// Exposed as `workspace.dir`.
+	//
+	// The pairing with WorkflowDir is the point: `workflow.dir` is
+	// where the CODE lives (read-only, shared by every run),
+	// `workspace.dir` is where this run's DATA goes (writable,
+	// per-scope). Confusing the two is the most common authoring
+	// mistake in composed workflows.
+	WorkspaceDir string
+	// ScopeStatus, when non-empty, is the aggregate status of the
+	// enclosing include scope and takes precedence over Run.Status for
+	// success() / failure(). It is what makes a fragment's own
+	// `finally:` block able to ask "did MY steps succeed" rather than
+	// "did the whole run succeed" — the two differ whenever a sibling
+	// include failed, which is exactly when teardown decisions matter.
+	//
+	// Empty for top-level steps, where the run's status is the right
+	// answer and Run.Status is used unchanged.
+	ScopeStatus string
 }
 
 // Evaluator is safe for concurrent use once constructed.
@@ -250,6 +272,9 @@ func (e *Evaluator) envMap(env Env) map[string]any {
 		"workflow": map[string]any{
 			"dir": env.WorkflowDir,
 		},
+		"workspace": map[string]any{
+			"dir": env.WorkspaceDir,
+		},
 	}
 	if env.Response != nil {
 		m["response"] = env.Response
@@ -269,7 +294,12 @@ func (e *Evaluator) envMap(env Env) map[string]any {
 	// re-registered per envMap() call so the value they see always
 	// matches the evaluator's current invocation, never a stale one
 	// from the compile-time cache.
+	// Scope status wins when set: inside an include, success() must mean
+	// "this fragment's steps succeeded", not "the run succeeded".
 	status := env.Run.Status
+	if env.ScopeStatus != "" {
+		status = env.ScopeStatus
+	}
 	cancelled := env.Run.Cancelled
 	m["success"] = func(args ...any) (any, error) {
 		return status == "" || status == "success", nil
@@ -371,6 +401,11 @@ func stringify(v any) string {
 		return "false"
 	case []byte:
 		return string(x)
+	case time.Duration:
+		// A duration is an int64 underneath, so the JSON fallback below
+		// would render `30s` as "30000000000". Emit the canonical form
+		// an operator wrote and a shell script expects.
+		return x.String()
 	default:
 		// Fall back to JSON for structured values so that a map/slice doesn't
 		// render as "map[a:1]" in a URL or a header.

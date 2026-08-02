@@ -129,10 +129,16 @@ func schedule(ctx context.Context, g *ir.Graph, parallel int, exec func(context.
 		sortKeysByIndex(newlyReady, idxByKey)
 
 		for _, r := range newlyReady {
-			if halt {
+			if halt && !byKey[r].RunAlways {
 				// Cascade skip: mark this node and (transitively) its
-				// dependents as Skipped without executing.
-				cascadeSkip(r, byKey, indeg, dependents, statuses, &mu, exec, ctx)
+				// dependents as Skipped without executing. Teardown
+				// nodes encountered during the walk are handed back
+				// rather than skipped — they exist to run after failure.
+				revived := cascadeSkip(r, byKey, indeg, dependents, statuses, &mu, exec, ctx)
+				sortKeysByIndex(revived, idxByKey)
+				for _, rv := range revived {
+					dispatch(rv)
+				}
 				continue
 			}
 			dispatch(r)
@@ -165,11 +171,25 @@ func schedule(ctx context.Context, g *ir.Graph, parallel int, exec func(context.
 // dependents graph as Skipped, emitting a synthetic StepStarted +
 // StepFinished{Skipped} pair through exec so state.json and the report
 // stay consistent.
-func cascadeSkip(k string, byKey map[string]*ir.StepNode, indeg map[string]int, dependents map[string][]string, statuses map[string]events.Status, mu *sync.Mutex, exec func(context.Context, *ir.StepNode) events.Status, ctx context.Context) {
+// Nodes marked RunAlways (teardown from a `finally:` block) are NOT
+// skipped. When the walk reaches one whose in-degree has dropped to
+// zero it is collected and returned so the caller can dispatch it —
+// cascadeSkip can't dispatch directly because the scheduler's
+// inflight/dispatched counters are owned by the main loop.
+func cascadeSkip(k string, byKey map[string]*ir.StepNode, indeg map[string]int, dependents map[string][]string, statuses map[string]events.Status, mu *sync.Mutex, exec func(context.Context, *ir.StepNode) events.Status, ctx context.Context) []string {
+	var revived []string
 	stack := []string{k}
 	for len(stack) > 0 {
 		cur := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
+		if n := byKey[cur]; n != nil && n.RunAlways {
+			// Teardown: don't mark, don't walk past it. Its own
+			// dependents stay blocked until it actually runs.
+			if indeg[cur] <= 0 {
+				revived = append(revived, cur)
+			}
+			continue
+		}
 		mu.Lock()
 		if _, done := statuses[cur]; done {
 			mu.Unlock()
@@ -196,6 +216,7 @@ func cascadeSkip(k string, byKey map[string]*ir.StepNode, indeg map[string]int, 
 			stack = append(stack, dep)
 		}
 	}
+	return revived
 }
 
 func isFatal(s events.Status) bool {

@@ -63,6 +63,10 @@ type Options struct {
 	// Server mode wires the server's logger here; CLI leaves it nil.
 	Logger *slog.Logger
 
+	// Preset names a bundle from the workflow's `presets:` map whose
+	// values sit below --input in precedence. Empty means none.
+	Preset string
+
 	// CatalogueRoot confines step-level `include:` resolution: an
 	// included path that resolves outside this directory is a
 	// compile-time error. Empty in CLI mode where the trust boundary
@@ -129,7 +133,13 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 	}
 
 	// Merge inputs (flag values) with declared defaults; coerce/validate.
-	inputs, secretVals, err := resolveInputs(wf, opts.Inputs)
+	inputs, secretVals, err := resolveInputs(wf, ResolveOptions{
+		Supplied:     opts.Inputs,
+		Preset:       opts.Preset,
+		WorkflowDir:  filepath.Dir(wf.Path),
+		WorkspaceDir: ws.StepsDir,
+		RunID:        runID,
+	})
 	if err != nil {
 		return Result{}, err
 	}
@@ -210,6 +220,7 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 		Secrets:       sec,
 		Env:           baseEnv,
 		Steps:         stepViews,
+		ScopeStatus:   map[string]events.Status{},
 		StepMu:        &stepMu,
 		ResumeCache:   resumeCache,
 		Workspace:     ws,
@@ -222,7 +233,15 @@ func Run(ctx context.Context, wf *schema.Workflow, opts Options) (Result, error)
 		RunID:         runID,
 	}
 	overallStatus := schedule(ctx, graph, parallel, func(ctx context.Context, node *ir.StepNode) events.Status {
-		return runStep(ctx, node, rc)
+		st := runStep(ctx, node, rc)
+		// One recording point covers every terminal path in runStep
+		// (success, failure, timeout, skip, cascade-skip) — including
+		// the synthetic exec() the scheduler makes for cascade-skipped
+		// nodes. A fragment's finally: steps are gated by needs: on its
+		// main steps, so those statuses are always recorded before the
+		// teardown builds its expression env.
+		recordScopeStatus(rc, node, st)
+		return st
 	})
 
 	// Cleanup pass. Runs sequentially (no needs: edges among cleanup
@@ -274,6 +293,13 @@ type runCtx struct {
 	// cleanup step. Feeds success()/failure() so cleanup gates work.
 	CleanupStatus    string
 	CleanupCancelled bool
+
+	// ScopeStatus accumulates the worst terminal status seen per include
+	// scope prefix, so a fragment's own `finally:` steps can gate on
+	// whether THAT fragment succeeded rather than on the whole run.
+	// Shares StepMu with Steps — both are written from parallel step
+	// goroutines and read when building an expression env.
+	ScopeStatus map[string]events.Status
 	// ForEachIter, when non-nil, means we're inside one iteration of a
 	// for-each expansion. runStep injects it into envForExpr as `each`
 	// and skips re-expansion. Nil for regular steps.
@@ -379,12 +405,23 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 	scopedInputs := rc.Inputs
 	scopedSteps := stepsSnap
 	workflowDir := filepath.Dir(rc.Workflow.Path)
+	// Working directory: top-level steps share the run workspace;
+	// steps inside an include get their scope's own subdirectory so two
+	// uses of the same fragment can't overwrite each other's files.
+	stepWorkdir := rc.Workspace.StepsDir
+	scopePrefix := ""
 	if node.Scope != nil {
 		scopedInputs = resolveScopeInputs(node.Scope, rc, stepsSnap)
 		scopedSteps = resolveScopeSteps(node.Scope, stepsSnap)
 		if node.Scope.Dir != "" {
 			workflowDir = node.Scope.Dir
 		}
+		scopePrefix = node.Scope.Prefix
+		d, err := rc.Workspace.ScopeDir(scopePrefix)
+		if err != nil {
+			return abortStep(rc, node, fmt.Errorf("scope workspace: %w", err))
+		}
+		stepWorkdir = d
 	}
 	envForExpr := expr.Env{
 		Inputs:  scopedInputs,
@@ -397,8 +434,10 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 			Status:    rc.CleanupStatus,    // empty during main graph, set during cleanup
 			Cancelled: rc.CleanupCancelled, // ditto
 		},
-		Each:        rc.ForEachIter, // nil outside a for-each iteration
-		WorkflowDir: workflowDir,
+		Each:         rc.ForEachIter, // nil outside a for-each iteration
+		WorkflowDir:  workflowDir,
+		WorkspaceDir: stepWorkdir,
+		ScopeStatus:  scopeStatusFor(rc, node),
 	}
 	// Give expressions access to secrets by name too.
 	for _, name := range secretNames(rc.Workflow) {
@@ -471,7 +510,8 @@ func runStep(ctx context.Context, node *ir.StepNode, rc runCtx) events.Status {
 		Steps:         rc.Steps,
 		Env:           resolvedEnv,
 		Secrets:       rc.Secrets,
-		Workdir:       rc.Workspace.StepsDir,
+		Workdir:       stepWorkdir,
+		ScopePrefix:   scopePrefix,
 		ArtifactsDir:  rc.Workspace.ArtifactsDir,
 		ExprEnv:       envForExpr,
 		Emit:          rc.Bus.Publish,
@@ -608,6 +648,81 @@ finishAttempts:
 // execution doesn't race on the map. Anonymous steps (empty id) are
 // tracked in the map under a synthetic key so the scheduler's completion
 // tally is correct, but nobody references them via expressions.
+// recordScopeStatus folds a finished step's status into the aggregate
+// for its scope and every ancestor scope. "edi.inner.step" contributes
+// to both "edi.inner" and "edi", so an outer fragment's finally: sees
+// a nested failure. Worst-status-wins: once a scope is failed it stays
+// failed, which is the semantics `failure()` needs.
+func recordScopeStatus(rc runCtx, node *ir.StepNode, st events.Status) {
+	if node.Scope == nil || node.Scope.Prefix == "" {
+		return
+	}
+	// finally: steps must not fold their own outcome back into the
+	// scope they are reporting on — otherwise a successful teardown
+	// would flip a failed scope back to success mid-block.
+	if node.RunAlways {
+		return
+	}
+	// A continue-on-error failure still failed. `continue-on-error` is a
+	// statement about run CONTROL FLOW ("don't halt the graph"), not
+	// about whether the work succeeded — and teardown cares only about
+	// the latter. A fragment that half-built a tenant and was allowed to
+	// continue must still see failure() in its own finally: block.
+	if st == events.FailedContinued {
+		st = events.Failed
+	}
+	rc.StepMu.Lock()
+	defer rc.StepMu.Unlock()
+	prefix := node.Scope.Prefix
+	for {
+		if worseStatus(st, rc.ScopeStatus[prefix]) {
+			rc.ScopeStatus[prefix] = st
+		}
+		i := strings.LastIndex(prefix, ".")
+		if i < 0 {
+			break
+		}
+		prefix = prefix[:i]
+	}
+}
+
+// worseStatus reports whether a is a worse outcome than b, using the
+// ordering the status functions care about: a fatal beats a soft
+// failure beats success. An empty current value is "nothing recorded
+// yet", so anything beats it.
+func worseStatus(a, b events.Status) bool {
+	return statusRank(a) > statusRank(b)
+}
+
+func statusRank(s events.Status) int {
+	switch s {
+	case events.Failed, events.TimedOut:
+		return 3
+	case events.FailedContinued:
+		return 2
+	case events.Success, events.Skipped:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// scopeStatusFor reads the aggregate for a node's scope. Returns "" for
+// top-level steps so the run status is used instead.
+func scopeStatusFor(rc runCtx, node *ir.StepNode) string {
+	if node.Scope == nil || node.Scope.Prefix == "" {
+		return ""
+	}
+	rc.StepMu.Lock()
+	defer rc.StepMu.Unlock()
+	st, ok := rc.ScopeStatus[node.Scope.Prefix]
+	if !ok {
+		// Nothing recorded yet means nothing has failed yet.
+		return string(events.Success)
+	}
+	return string(st)
+}
+
 func setStepView(rc runCtx, id string, sv expr.StepView) {
 	if id == "" {
 		return
@@ -844,13 +959,18 @@ func resolveScopeInputs(scope *ir.Scope, rc runCtx, stepsSnap map[string]expr.St
 	// workflow.dir set from scope.Dir. We deliberately don't expose
 	// other inputs to defaults to sidestep the chicken-and-egg of
 	// input-order dependencies inside one workflow file.
+	defaultScopeWS := rc.Workspace.StepsDir
+	if d, err := rc.Workspace.ScopeDir(scope.Prefix); err == nil {
+		defaultScopeWS = d
+	}
 	defaultEnv := expr.Env{
-		Inputs:      map[string]any{},
-		Steps:       map[string]expr.StepView{},
-		Env:         rc.Env,
-		Secrets:     map[string]string{},
-		Run:         expr.RunMeta{ID: rc.RunID, Workspace: rc.Workspace.StepsDir},
-		WorkflowDir: scope.Dir,
+		Inputs:       map[string]any{},
+		Steps:        map[string]expr.StepView{},
+		Env:          rc.Env,
+		Secrets:      map[string]string{},
+		Run:          expr.RunMeta{ID: rc.RunID, Workspace: rc.Workspace.StepsDir},
+		WorkflowDir:  scope.Dir,
+		WorkspaceDir: defaultScopeWS,
 	}
 	out := make(map[string]any, len(scope.Inputs))
 	for name, b := range scope.Inputs {
@@ -873,9 +993,36 @@ func resolveScopeInputs(scope *ir.Scope, rc runCtx, stepsSnap map[string]expr.St
 			out[name] = fmt.Sprintf("<expr-error: %s: %v>", b.Expr, err)
 			continue
 		}
+		// with_if_set: an empty result means "caller didn't actually
+		// supply this", so fall back to the child's own default rather
+		// than forcing "" on it.
+		if b.IfSet && isEmptyValue(v) {
+			fb := b.Fallback
+			if s, ok := fb.(string); ok && strings.Contains(s, "${{") {
+				if iv, ierr := rc.Expr.Interpolate(s, defaultEnv); ierr == nil {
+					fb = iv
+				}
+			}
+			out[name] = fb
+			continue
+		}
 		out[name] = v
 	}
 	return out
+}
+
+// isEmptyValue reports whether a resolved binding should count as
+// "not supplied" for with_if_set. nil and "" are the cases that
+// actually occur (an unset upstream input interpolates to ""); other
+// zero values like 0 or false are deliberately NOT treated as empty,
+// because `false` and `0` are legitimate explicit choices a caller
+// might mean to pass.
+func isEmptyValue(v any) bool {
+	if v == nil {
+		return true
+	}
+	s, ok := v.(string)
+	return ok && strings.TrimSpace(s) == ""
 }
 
 // resolveScopeSteps builds the child's local view of `steps.*`. Child
@@ -911,16 +1058,27 @@ func resolveScopeSteps(scope *ir.Scope, stepsSnap map[string]expr.StepView) map[
 // recursively during input-binding evaluation.
 func envForScope(scope *ir.Scope, rc runCtx, stepsSnap map[string]expr.StepView) expr.Env {
 	dir := filepath.Dir(rc.Workflow.Path)
-	if scope != nil && scope.Dir != "" {
-		dir = scope.Dir
+	// workspace.dir must resolve at the scope being evaluated, not the
+	// run root — that's what makes `with: { out: "${{ workspace.dir
+	// }}/corpus" }` mean "the CALLER's workspace" and so let two
+	// children deliberately share one directory.
+	wsDir := rc.Workspace.StepsDir
+	if scope != nil {
+		if scope.Dir != "" {
+			dir = scope.Dir
+		}
+		if d, err := rc.Workspace.ScopeDir(scope.Prefix); err == nil {
+			wsDir = d
+		}
 	}
 	return expr.Env{
-		Inputs:      resolveScopeInputs(scope, rc, stepsSnap),
-		Steps:       resolveScopeSteps(scope, stepsSnap),
-		Env:         rc.Env,
-		Secrets:     map[string]string{},
-		Run:         expr.RunMeta{ID: rc.RunID, Workspace: rc.Workspace.StepsDir},
-		WorkflowDir: dir,
+		Inputs:       resolveScopeInputs(scope, rc, stepsSnap),
+		Steps:        resolveScopeSteps(scope, stepsSnap),
+		Env:          rc.Env,
+		Secrets:      map[string]string{},
+		Run:          expr.RunMeta{ID: rc.RunID, Workspace: rc.Workspace.StepsDir},
+		WorkflowDir:  dir,
+		WorkspaceDir: wsDir,
 	}
 }
 

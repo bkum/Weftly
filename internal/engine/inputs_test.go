@@ -13,7 +13,7 @@ func TestResolveInputsEnumAccepts(t *testing.T) {
 			"env": {Enum: []any{"dev", "staging", "prod"}, Default: "dev"},
 		},
 	}
-	out, _, err := resolveInputs(wf, map[string]any{"env": "prod"})
+	out, _, err := resolveInputs(wf, ResolveOptions{Supplied: map[string]any{"env": "prod"}})
 	if err != nil {
 		t.Fatalf("resolveInputs: %v", err)
 	}
@@ -28,11 +28,11 @@ func TestResolveInputsEnumRejects(t *testing.T) {
 			"env": {Enum: []any{"dev", "staging", "prod"}, Default: "dev"},
 		},
 	}
-	_, _, err := resolveInputs(wf, map[string]any{"env": "bogus"})
+	_, _, err := resolveInputs(wf, ResolveOptions{Supplied: map[string]any{"env": "bogus"}})
 	if err == nil {
 		t.Fatal("expected enum-mismatch error")
 	}
-	if !strings.Contains(err.Error(), "is not one of") {
+	if !strings.Contains(err.Error(), "is not a valid choice") {
 		t.Errorf("error message: got %v", err)
 	}
 }
@@ -46,7 +46,7 @@ func TestResolveInputsEnumDefaultIsAllowed(t *testing.T) {
 			"env": {Enum: []any{"dev", "staging", "prod"}, Default: "dev"},
 		},
 	}
-	out, _, err := resolveInputs(wf, nil)
+	out, _, err := resolveInputs(wf, ResolveOptions{})
 	if err != nil {
 		t.Fatalf("resolveInputs (default path): %v", err)
 	}

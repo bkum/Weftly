@@ -180,6 +180,45 @@ func compileSteps(steps []schema.Step, parentScope *ir.Scope, dir, sourceFile st
 		// child.outputs entries are well-formed strings.
 		out = append(out, childNodes...)
 
+		// Scope teardown. The child's `finally:` steps run after its own
+		// steps, whatever their outcome — RunAlways exempts them from the
+		// scheduler's cascade-skip, which is right for downstream work but
+		// exactly wrong for teardown.
+		//
+		// Ordering is innermost-first by construction: a nested include's
+		// finally nodes were already appended by the recursive call above,
+		// so they precede this scope's in `out` and therefore in the
+		// topological walk.
+		if len(child.Finally) > 0 {
+			finallyNodes, ferr := compileSteps(child.Finally, childScope, filepath.Dir(incPath), incPath, newChain, opts, root)
+			if ferr != nil {
+				return nil, ferr
+			}
+			var prev string
+			if len(childNodes) > 0 {
+				prev = childNodes[len(childNodes)-1].ID
+			}
+			for i, fn := range finallyNodes {
+				fn.RunAlways = true
+				// Namespace teardown ids so they can't collide with the
+				// fragment's main steps, and chain them sequentially after
+				// the last main step.
+				fn.ID = childPrefix + ".finally." + fn.LocalID
+				if i == 0 {
+					if prev != "" {
+						fn.Needs = []string{prev}
+					}
+				} else {
+					fn.Needs = []string{finallyNodes[i-1].ID}
+				}
+			}
+			out = append(out, finallyNodes...)
+			// The outputs shim (below) must land after teardown so the
+			// include's own completion genuinely means "everything this
+			// fragment does is finished".
+			childNodes = append(childNodes, finallyNodes...)
+		}
+
 		// Synthesized outputs node: an internal `include_outputs`
 		// action that evaluates each entry of child.Outputs in the
 		// child scope at runtime, producing them as its own Outputs so
@@ -295,16 +334,35 @@ func stripWrap(s string) string {
 // expression (from the parent) or a literal default, and rejects both
 // missing-required and unknown-input errors.
 func bindInputs(step *schema.Step, child *schema.Workflow) (map[string]ir.Binding, error) {
-	// with: keys the child never declared → typo class of errors.
-	for k := range step.With {
-		if _, ok := child.Inputs[k]; !ok {
-			return nil, fmt.Errorf("step %q include: with: key %q is not a declared input of %s", step.ID, k, child.Path)
+	// with:/with_if_set: keys the child never declared → typo class of errors.
+	for _, m := range []map[string]string{step.With, step.WithIfSet} {
+		for k := range m {
+			if _, ok := child.Inputs[k]; !ok {
+				return nil, fmt.Errorf("step %q include: with: key %q is not a declared input of %s", step.ID, k, child.Path)
+			}
+		}
+	}
+	// The same key in both maps is ambiguous — one unconditionally
+	// overrides, the other conditionally defers. Reject rather than
+	// silently pick.
+	for k := range step.WithIfSet {
+		if _, dup := step.With[k]; dup {
+			return nil, fmt.Errorf("step %q include: key %q appears in both with: and with_if_set: — use one", step.ID, k)
 		}
 	}
 	out := make(map[string]ir.Binding, len(child.Inputs))
 	for name, in := range child.Inputs {
 		if expr, ok := step.With[name]; ok {
 			out[name] = ir.Binding{Expr: expr, IsExpr: true, Secret: in.Secret}
+			continue
+		}
+		if expr, ok := step.WithIfSet[name]; ok {
+			// Carry the child's own default as the fallback so an
+			// empty runtime value lands on it instead of on "".
+			out[name] = ir.Binding{
+				Expr: expr, IsExpr: true, Secret: in.Secret,
+				IfSet: true, Fallback: in.Default,
+			}
 			continue
 		}
 		if in.Default != nil {

@@ -127,7 +127,7 @@ func newRunManager(baseDir, catalogueRoot string, log *slog.Logger, store action
 // Note: the run intentionally uses a detached context (context.Background)
 // so that returning from the POST /runs handler doesn't cancel the run.
 // The run's lifetime is bound to the process, not the initiating request.
-func (m *runManager) start(_ context.Context, wfID string, wf *schema.Workflow, inputs map[string]any) (*runRecord, error) {
+func (m *runManager) start(_ context.Context, wfID string, wf *schema.Workflow, inputs map[string]any, preset string) (*runRecord, error) {
 	rec := newRunRecord("", wfID, inputs)
 	bus := events.NewBus()
 
@@ -159,6 +159,7 @@ func (m *runManager) start(_ context.Context, wfID string, wf *schema.Workflow, 
 			BaseDir:         m.baseDir,
 			CatalogueRoot:   m.catalogueRoot,
 			Inputs:          inputs,
+			Preset:          preset,
 			Bus:             bus,
 			ArtifactStore:   m.store,
 			PostSubscribers: []func(events.Event){rec.handle},

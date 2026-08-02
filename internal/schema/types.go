@@ -37,7 +37,55 @@ type Input struct {
 	// Enum, when non-empty, restricts the input to one of the listed
 	// values. Renders as a picklist in the SPA and is validated at
 	// input-resolution time.
+	//
+	// `enum:` predates the type system and stays supported. New
+	// workflows should prefer `type: enum` with `values:`; both are
+	// read through Input.AllowedValues.
 	Enum []any `yaml:"enum" json:"enum,omitempty"`
+
+	// --- type constraints (see docs/FEATURES.md §1) -------------------
+	//
+	// All are nil/zero when unconstrained. Pointer types distinguish
+	// "not declared" from "declared as zero" — `min: 0` is a real
+	// constraint, and a plain int64 could not express it.
+
+	// Values is the allowed set for `type: enum` (and for `items: enum`
+	// inside a list).
+	Values []string `yaml:"values" json:"values,omitempty"`
+	// Items is the element type for `type: list`.
+	Items InputType `yaml:"items" json:"items,omitempty"`
+	// Min / Max bound int, number, and duration inputs. For duration
+	// they are nanosecond counts, parsed from the YAML duration form.
+	Min *float64 `yaml:"-" json:"min,omitempty"`
+	Max *float64 `yaml:"-" json:"max,omitempty"`
+	// MinLen / MaxLen bound string length.
+	MinLen *int `yaml:"min_length" json:"min_length,omitempty"`
+	MaxLen *int `yaml:"max_length" json:"max_length,omitempty"`
+	// MinItems / MaxItems bound list length.
+	MinItems *int `yaml:"min_items" json:"min_items,omitempty"`
+	MaxItems *int `yaml:"max_items" json:"max_items,omitempty"`
+	// Pattern is a Go regexp a string input must match.
+	Pattern string `yaml:"pattern" json:"pattern,omitempty"`
+	// MustExist makes a `type: path` input fail at resolution when the
+	// file is absent, rather than at the step that opens it.
+	MustExist bool `yaml:"must_exist" json:"must_exist,omitempty"`
+
+	// HasDefault distinguishes "no default" from "default: null", and
+	// more importantly from `default: false` / `default: 0`, which are
+	// meaningful values a zero-check would discard. Set by
+	// UnmarshalYAML.
+	HasDefault bool `yaml:"-" json:"-"`
+
+	// rawMin / rawMax capture the YAML scalar before type-aware
+	// conversion — `max: 10m` on a duration and `max: 50000` on an int
+	// are both valid and need different parsing, which isn't known
+	// until the type is read.
+	rawMin string `yaml:"-"`
+	rawMax string `yaml:"-"`
+
+	// Line is the source line of this input's declaration, for the
+	// "declared at file:line" tail on input errors.
+	Line int `yaml:"-" json:"-"`
 }
 
 // HTTPDefaults holds workflow-level defaults merged into every http step.
@@ -70,6 +118,23 @@ type Workflow struct {
 	// This is the top-level "prelude" include (Phase 4). The step-level
 	// `include:` (with `with:`) is a different feature — see Step.Include.
 	Include []string `yaml:"include"`
+	// Library marks this file as a fragment meant only to be included by
+	// another workflow, never run on its own. A library is excluded from
+	// the served catalogue, rejected as a direct `POST /runs` target, and
+	// rejected at schedule-load time.
+	//
+	// This is an authorisation control, not presentation. Without it every
+	// fragment in a toolkit is an ordinary catalogue entry: independently
+	// triggerable by any principal holding `workflows: "*"`, and
+	// schedulable — even though it was written to run only as part of a
+	// caller that supplies its inputs.
+	Library bool `yaml:"library"`
+	// Presets are named bundles of input values, validated against the
+	// input schema at compile time. A preset may not supply a value for
+	// a `secret: true` input — presets live in committed YAML readable
+	// through GET /workflows/{id}, so that would be a credential in
+	// version control.
+	Presets map[string]Preset `yaml:"presets" json:"presets,omitempty"`
 	// Outputs is the top-level output contract of the workflow, evaluated
 	// in the workflow's own scope after its steps have run. When this
 	// workflow is used as a step-level include, the parent references
@@ -81,6 +146,19 @@ type Workflow struct {
 	// failure() / cancelled() populated from the run's aggregate
 	// status so `if:` gates work.
 	Cleanup []Step `yaml:"cleanup"`
+	// Finally is scope teardown: steps that run after THIS workflow's
+	// own steps complete, whatever their outcome. Where `cleanup:` is
+	// run-level and fires once at the very end, `finally:` belongs to
+	// the workflow that declares it — so an included fragment can tear
+	// down just the resources it created without knowing anything
+	// about its caller.
+	//
+	// Inside a `finally:` block, success() / failure() report the
+	// ENCLOSING SCOPE's status, not the run's. That is the distinction
+	// that makes teardown decidable: a fragment wants to know whether
+	// it left a half-built tenant behind, not whether some unrelated
+	// sibling failed.
+	Finally []Step `yaml:"finally"`
 
 	// Source retains the parsed YAML root node for line-number-aware error
 	// reporting. Nil after a bare struct construction (e.g. tests).
@@ -138,6 +216,18 @@ type Step struct {
 	// contract at `steps.<this-id>.outputs.*`.
 	Include string            `yaml:"include"`
 	With    map[string]string `yaml:"with"`
+	// WithIfSet binds a child input ONLY when the expression evaluates
+	// to a non-empty value; otherwise the child's own `default:` stays
+	// in force. This is the conditional-passthrough case that plain
+	// `with:` gets wrong: a caller forwarding its own optional input
+	// (`parties_json: "${{ inputs.parties_json }}"`) clobbers the
+	// child's carefully-chosen default with "" whenever the caller's
+	// input wasn't supplied.
+	//
+	// Deciding at runtime rather than compile time is required — the
+	// bound expression can reference a prior step's output, whose
+	// emptiness isn't knowable until that step runs.
+	WithIfSet map[string]string `yaml:"with_if_set"`
 
 	// Populated by custom unmarshal. ActionType is one of actionKeys.
 	// ActionNode holds the raw YAML for that action's config so per-action

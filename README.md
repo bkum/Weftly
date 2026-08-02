@@ -109,14 +109,81 @@ step id (`resolve-id`) parses as subtraction inside an expression
 | `assert`   | Standalone boolean checkpoint. |
 | `summary`  | Emits markdown into the final report. |
 | `upload`   | Copies a workspace file/glob into `./.weftly/runs/<id>/artifacts/`. |
-| `prompt`   | Reserved. Interactive prompts are a Phase 2 feature. |
+| `prompt`   | Interactive input: `text`, `password`, `confirm`, `select`. `--yes` auto-answers every `confirm`. |
+| `wait`     | Polls until a condition holds or a time budget expires. |
+| `parse`    | Extracts structure from text (JSON flattening, regex named groups) into step outputs. |
+| `notify`   | POSTs a Slack-shaped or fully custom payload to a webhook. Non-2xx fails the step. |
+| `include`  | Calls another workflow as a step, passing inputs via `with:` / `with_if_set:` and consuming its declared `outputs:`. See [docs/FEATURES.md](docs/FEATURES.md#4-workflow-composition-include). |
+
+### Typed inputs and presets
+
+```yaml
+inputs:
+  domain: { type: enum, values: [retail, healthcare], default: retail }
+  cases:  { type: int, min: 100, max: 50000, default: 2500 }
+  token:  { type: string, secret: true, min_length: 20 }
+
+presets:
+  qa_exceptions:
+    description: Small corpus weighted toward error paths
+    values: { domain: healthcare, cases: 500 }
+```
+
+Types: `string` (the default when `type:` is omitted), `int`, `number`,
+`bool`, `enum`, `duration`, `json`, `path`, `list`. Coercion is strict —
+`3.0` is not an `int`. Every bad field in one submission is reported
+together, and an enum near-miss gets a did-you-mean.
+
+A constraint violation on a `secret:` input reports the constraint and
+never the value.
+
+`weftly describe <workflow.yml>` prints the whole contract. Apply a
+preset with `--preset <name>`; `--input` still wins over it.
+
+### Teardown
+
+`cleanup:` is **run-level** — it fires once after the whole graph,
+whatever the outcome. `finally:` is **scope-level** — it belongs to the
+workflow that declares it, so an included fragment tears down only what
+it created, without knowing anything about its caller. Nested fragments
+tear down innermost-first, and teardown steps are exempt from the
+cascade-skip that stops ordinary downstream work after a failure.
+
+Inside a fragment's `finally:`, `success()` / `failure()` report *that
+fragment's* status, not the run's.
+
+### Library fragments
+
+`library: true` marks a workflow that may only be *included*, never run
+on its own. It is excluded from the served catalogue, rejected as a
+`POST /runs` target, and rejected when a schedule names it — but stays
+freely includable.
+
+This is an authorisation control. Without it, every fragment in a
+toolkit is an ordinary catalogue entry that any principal holding
+`workflows: "*"` can trigger directly or schedule, despite being written
+to run only as part of a caller that supplies its inputs.
+
+A complete, verified feature record — including what is **not**
+implemented — lives in [docs/FEATURES.md](docs/FEATURES.md).
 
 ### Expressions
 
 `${{ ... }}` spans are evaluated by [expr-lang/expr](https://github.com/expr-lang/expr).
 Namespaces: `inputs.<name>`, `steps.<id>.outputs.<key>`,
-`steps.<id>.status`, `env.<KEY>`, `secrets.<name>`, `run.{id,workspace}`,
-and (inside `http`) `response.{status,headers,body,raw}`.
+`steps.<id>.status`, `env.<KEY>`, `secrets.<name>`,
+`run.{id,workspace,status,cancelled}`, `each.{value,index}` (inside
+`for-each`), `workflow.dir`, `workspace.dir`, and (inside `http`)
+`response.{status,headers,body,raw}`.
+
+Status functions `success()`, `failure()`, `always()`, and `cancelled()`
+are available, and are what make `cleanup:` gates work.
+
+`workflow.dir` is the directory of the YAML file that authored the step —
+where the *code* lives, read-only and shared by every run. `workspace.dir`
+is that step's working directory — where this run's *data* goes, writable
+and per-scope. Reach a library's bundled assets with the former, place
+output with the latter.
 
 Helpers registered by weftly: `default(v, fb)`, `fromJSON(s)`,
 `toJSON(v)`, `urlquery(s)`. String ops are expr-native operators:
@@ -159,6 +226,9 @@ weftly import-gha <path-or-->          Convert a GitHub Actions workflow to
 weftly server                          Start the REST + SSE + UI server
   --addr :8080           listen address
   --dir  ./workflows     catalogue directory (only these workflows run)
+  --include-root <dir>   widen the boundary step-level `include:` may reach
+                         (defaults to --dir; set to a project root when
+                         workflows/ and lib/ are siblings)
   --runs-dir ./.weftly   parent directory for per-run state
   --token ...            single bearer token (or $WEFTLY_TOKEN)
   --auth-file <path>     multi-token RBAC file (supersedes --token)

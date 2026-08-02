@@ -43,9 +43,17 @@ type StepContext struct {
 	Steps        map[string]expr.StepView
 	Env          map[string]string
 	Secrets      *secrets.Registry
-	Workdir      string   // per-run workspace (step cwd)
+	Workdir      string   // step cwd: run workspace, or the scope's subdir inside an include
 	ArtifactsDir string   // per-run artifacts destination
 	ExprEnv      expr.Env // pre-built evaluation env for this step
+
+	// ScopePrefix is the dotted include prefix this step runs under
+	// ("edi", or "a.b" when nested), empty for top-level steps. The
+	// upload action uses it to qualify artifact names so two uses of
+	// the same fragment don't overwrite each other's artifacts — in
+	// the local artifacts dir AND in the remote object store, which
+	// must agree or the collision simply reappears at the remote tier.
+	ScopePrefix string
 
 	Emit func(events.Event)
 	Expr *expr.Evaluator
