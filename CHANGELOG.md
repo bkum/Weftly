@@ -166,7 +166,41 @@ complete current feature record.
   hints, `pattern` / length → native inline validation. Presets render
   as a row of buttons above the form that populate it.
 
+### Security
+
+- **`type: path` inputs are confined** to the run workspace or the
+  workflow's own directory tree, and resolve to an absolute path built
+  by re-anchoring a verified-relative remainder onto the matched root
+  rather than by carrying the caller's string forward. Previously a
+  path input was unchecked: it flowed into steps that open it, making
+  it a read/write primitive against the host for anyone who could
+  `POST /runs`, and `must_exist` additionally turned it into a
+  file-existence oracle.
+
+  The `must_exist` probe goes through `os.Root`, which constrains every
+  operation to the opened directory in the kernel — a traversal or
+  symlink escape is unrepresentable rather than merely rejected, so the
+  check holds independently of the surrounding containment logic.
+
+- **Suggestion matching is bounded.** `did-you-mean` skips values over
+  128 bytes and pre-filters on length difference (two strings differing
+  by more than 2 in length cannot be within edit distance 2), so a
+  caller cannot spend server CPU by posting a megabyte-long enum value
+  into an O(n·m) comparison against every candidate.
+
+- **Bumped `google.golang.org/grpc` to v1.82.1** for GO-2026-6061. It
+  arrives transitively via the OTLP trace exporter.
+
 ### Fixed
+
+- **Path confinement and macOS symlinks.** `filepath.EvalSymlinks`
+  fails outright when a path's leaf does not exist — the normal case
+  for an output path a workflow is about to create — so the candidate
+  stayed lexical while the roots were canonical. On macOS, where every
+  temp dir is `/var/...` symlinked to `/private/var/...`, that made a
+  legal workspace-relative path look like an escape. Resolution now
+  canonicalises the longest existing prefix and re-appends the
+  remainder.
 
 - **Release archives were missing `workflows/` and `examples/`.**
   GoReleaser v2's bare-string globs matched nothing for `workflows/**/*`
