@@ -270,16 +270,28 @@ func resolvePathInput(p string, mustExist bool, opts ResolveOptions) (string, st
 		// Re-anchor onto the root rather than carrying the
 		// caller-derived absolute path forward. `rel` has been proven
 		// not to climb out, so Join can only produce something inside
-		// `root` — the result is constructed from a trusted base plus a
-		// verified-relative remainder, which is both the clearer
-		// intent and the shape a taint analyser can follow.
+		// `root`: the result is constructed from a trusted base plus a
+		// verified-relative remainder rather than merely checked.
 		safe := filepath.Join(root, rel)
 		if mustExist {
-			// Safe to touch now: `safe` is inside a permitted root.
+			// The existence probe goes through os.Root, which confines
+			// every operation to the opened directory in the kernel —
+			// a traversal or symlink escape is not merely rejected but
+			// unrepresentable. That makes the check independent of the
+			// Rel/prefix logic above: even if this function's own
+			// containment reasoning were wrong, the probe still cannot
+			// read outside `root`.
+			//
 			// Failing here rather than at the step that opens the file
 			// means a missing profile registry names the input instead
 			// of surfacing as a shell error four steps later.
-			if _, err := os.Stat(safe); err != nil {
+			r, oerr := os.OpenRoot(root)
+			if oerr != nil {
+				return "", fmt.Sprintf("path %q could not be checked: %v", p, oerr)
+			}
+			_, serr := r.Stat(rel)
+			r.Close()
+			if serr != nil {
 				return "", fmt.Sprintf("path %q does not exist (must_exist: true)", p)
 			}
 		}

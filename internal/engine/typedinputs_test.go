@@ -304,3 +304,36 @@ steps: [{id: s, run: echo}]`)
 		t.Error("traversal out of a symlinked root must still be rejected")
 	}
 }
+
+// A symlink planted inside the workspace that points outside it must not
+// become an escape hatch. Two independent layers stop it: canonicalPath
+// resolves the link before the containment test, and the must_exist
+// probe runs through os.Root, which cannot traverse out of the opened
+// directory even if the first layer were wrong.
+func TestPathSymlinkEscapeRejected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs elevation on windows")
+	}
+	ws := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(ws, "escape")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	wf := mustParse(t, `
+name: t
+inputs:
+  p: { type: path, must_exist: true }
+steps: [{id: s, run: echo}]`)
+	_, _, err := resolveInputs(wf, ResolveOptions{
+		Supplied: map[string]any{"p": "escape/secret.txt"}, WorkspaceDir: ws, WorkflowDir: ws,
+	})
+	if err == nil {
+		t.Fatal("a symlink out of the workspace must not be readable through a path input")
+	}
+	if !strings.Contains(err.Error(), "outside") {
+		t.Errorf("want a confinement error, got %v", err)
+	}
+}
