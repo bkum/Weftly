@@ -1,8 +1,11 @@
 package engine
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bkum/weftly/internal/schema"
 )
@@ -153,5 +156,97 @@ steps: [{id: s, run: echo}]`)
 	_, _, err := resolveInputs(wf, ResolveOptions{})
 	if err == nil || !strings.Contains(err.Error(), "env_url") {
 		t.Fatalf("want a required-input error naming env_url, got %v", err)
+	}
+}
+
+// A `type: path` input is caller-supplied and flows into steps that
+// open it, so it must be confined. Both legitimate roots are allowed:
+// the run workspace (somewhere to write) and the workflow's own tree
+// (a library's bundled assets).
+func TestPathInputConfinement(t *testing.T) {
+	ws := t.TempDir()
+	wfdir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(wfdir, "asset.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wf := mustParse(t, `
+name: t
+inputs:
+  p: { type: path }
+steps: [{id: s, run: echo}]`)
+
+	resolve := func(v string) (map[string]any, error) {
+		out, _, err := resolveInputs(wf, ResolveOptions{
+			Supplied: map[string]any{"p": v}, WorkspaceDir: ws, WorkflowDir: wfdir,
+		})
+		return out, err
+	}
+
+	// Escaping both roots is rejected.
+	if _, err := resolve("/etc/passwd"); err == nil {
+		t.Error("an absolute path outside both roots must be rejected")
+	}
+	if _, err := resolve("../../../etc/passwd"); err == nil {
+		t.Error("traversal out of the workspace must be rejected")
+	}
+
+	// Inside the workspace: allowed, and returned absolute.
+	out, err := resolve("out/report.html")
+	if err != nil {
+		t.Fatalf("a workspace-relative path should be allowed: %v", err)
+	}
+	if got := out["p"].(string); !strings.HasPrefix(got, ws) {
+		t.Errorf("expected a path under the workspace, got %q", got)
+	}
+
+	// Inside the workflow's tree: allowed, so a library can reach its
+	// own bundled assets via ${{ workflow.dir }}.
+	if _, err := resolve(filepath.Join(wfdir, "asset.json")); err != nil {
+		t.Errorf("a path under the workflow dir should be allowed: %v", err)
+	}
+}
+
+// must_exist reports against the input rather than failing four steps
+// later in a shell command.
+func TestPathMustExist(t *testing.T) {
+	ws := t.TempDir()
+	wf := mustParse(t, `
+name: t
+inputs:
+  p: { type: path, must_exist: true }
+steps: [{id: s, run: echo}]`)
+	_, _, err := resolveInputs(wf, ResolveOptions{
+		Supplied: map[string]any{"p": "nope.json"}, WorkspaceDir: ws, WorkflowDir: ws,
+	})
+	if err == nil || !strings.Contains(err.Error(), "must_exist") {
+		t.Fatalf("want a must_exist error, got %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "yes.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := resolveInputs(wf, ResolveOptions{
+		Supplied: map[string]any{"p": "yes.json"}, WorkspaceDir: ws, WorkflowDir: ws,
+	}); err != nil {
+		t.Errorf("an existing file should pass: %v", err)
+	}
+}
+
+// didYouMean must not do unbounded work on a caller-sized value.
+func TestDidYouMeanIgnoresHugeValues(t *testing.T) {
+	wf := mustParse(t, `
+name: t
+inputs:
+  domain: { type: enum, values: [retail, healthcare] }
+steps: [{id: s, run: echo}]`)
+	huge := strings.Repeat("x", 1<<20)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _, _ = resolveInputs(wf, ResolveOptions{Supplied: map[string]any{"domain": huge}})
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("resolving a 1 MiB enum value took too long — suggestion work is unbounded")
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -123,12 +124,29 @@ func resolveInputs(wf *schema.Workflow, opts ResolveOptions) (map[string]any, []
 			ierrs = append(ierrs, *cerr)
 			continue
 		}
-		// type: path with must_exist fails here rather than at the step
-		// that opens the file — a missing profile registry should name
-		// the input, not surface as a shell error four steps later.
-		if in.EffectiveType() == schema.InputPath && in.MustExist {
-			if p, ok := v.(string); ok {
-				if _, err := os.Stat(p); err != nil {
+		// type: path — confine, then (optionally) check existence.
+		// Confinement first: the value is caller-supplied and flows on
+		// into steps that open it, so an unconfined path input is a
+		// read/write primitive against the whole host for anyone who can
+		// POST /runs. must_exist would additionally make it a file
+		// existence oracle.
+		if in.EffectiveType() == schema.InputPath {
+			p, ok := v.(string)
+			if !ok {
+				out[name] = v
+				continue
+			}
+			abs, perr := resolvePathInput(p, opts)
+			if perr != "" {
+				ierrs = append(ierrs, schema.InputError{Input: name, Line: in.Line, Message: perr})
+				continue
+			}
+			v = abs
+			if in.MustExist {
+				// Failing here rather than at the step that opens the
+				// file means a missing profile registry names the input
+				// instead of surfacing as a shell error four steps later.
+				if _, err := os.Stat(abs); err != nil {
 					ierrs = append(ierrs, schema.InputError{
 						Input: name, Line: in.Line,
 						Message: fmt.Sprintf("path %q does not exist (must_exist: true)", p),
@@ -190,4 +208,70 @@ func ParseKVString(pairs []string) (map[string]string, error) {
 		m[p[:i]] = p[i+1:]
 	}
 	return m, nil
+}
+
+// resolvePathInput resolves and confines a `type: path` value, returning
+// the absolute path or a non-empty error message.
+//
+// Two roots are permitted, because the spec asks for both and they serve
+// different purposes:
+//
+//   - the run WORKSPACE, where a path input naming somewhere to write
+//     belongs (this is the `upload` / `template dest:` rule);
+//   - the WORKFLOW's own directory tree, because a self-contained
+//     library legitimately points at its bundled assets with
+//     `default: "${{ workflow.dir }}/profiles/x12.json"` — which is in
+//     the catalogue, not the workspace.
+//
+// Anything else is rejected. Relative paths resolve against the
+// workspace, matching how every other path in a step is interpreted.
+//
+// Symlinks are resolved before the containment test where the target
+// exists, so a symlink planted inside a root cannot point out of it.
+// A path that doesn't exist yet is tested lexically, which is correct
+// for an output path the workflow is about to create.
+func resolvePathInput(p string, opts ResolveOptions) (string, string) {
+	roots := make([]string, 0, 2)
+	for _, r := range []string{opts.WorkspaceDir, opts.WorkflowDir} {
+		if r == "" {
+			continue
+		}
+		if abs, err := filepath.Abs(r); err == nil {
+			if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+				abs = resolved
+			}
+			roots = append(roots, abs)
+		}
+	}
+	// No roots configured (bare-struct tests) — nothing to confine
+	// against, so pass the value through rather than reject everything.
+	if len(roots) == 0 {
+		return p, ""
+	}
+
+	abs := p
+	if !filepath.IsAbs(abs) {
+		base := opts.WorkspaceDir
+		if base == "" {
+			base = opts.WorkflowDir
+		}
+		abs = filepath.Join(base, abs)
+	}
+	var err error
+	if abs, err = filepath.Abs(abs); err != nil {
+		return "", fmt.Sprintf("path %q could not be resolved: %v", p, err)
+	}
+	if resolved, rerr := filepath.EvalSymlinks(abs); rerr == nil {
+		abs = resolved
+	}
+	for _, root := range roots {
+		rel, rerr := filepath.Rel(root, abs)
+		if rerr != nil {
+			continue
+		}
+		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return abs, ""
+		}
+	}
+	return "", fmt.Sprintf("path %q resolves outside the run workspace and the workflow directory", p)
 }

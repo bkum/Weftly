@@ -417,12 +417,35 @@ var quoted = regexp.MustCompile(`"[^"]*"`)
 
 func redactValue(msg string) string { return quoted.ReplaceAllString(msg, "value") }
 
+// maxSuggestLen bounds the strings didYouMean will compare. The
+// supplied value is caller-controlled and effectively unbounded (an API
+// client can POST megabytes), while a candidate is an identifier an
+// author typed. Levenshtein is O(n*m), so comparing a 10 MB value
+// against every candidate is free CPU for whoever sends it — and a
+// suggestion for a 10 MB "typo" would be nonsense anyway.
+const maxSuggestLen = 128
+
 // didYouMean returns the closest candidate within edit distance 2.
+//
+// Length pre-filtering is both an optimisation and the bound that keeps
+// this safe: two strings whose lengths differ by more than 2 cannot be
+// within edit distance 2, so the quadratic loop only ever runs on
+// near-equal, short strings.
 func didYouMean(got string, candidates []string) string {
+	if len(got) > maxSuggestLen {
+		return ""
+	}
 	best, bestD := "", 3
 	sorted := append([]string(nil), candidates...)
 	sort.Strings(sorted)
+	lg := len([]rune(got))
 	for _, c := range sorted {
+		if len(c) > maxSuggestLen {
+			continue
+		}
+		if d := lg - len([]rune(c)); d > 2 || d < -2 {
+			continue // cannot possibly be within distance 2
+		}
 		if d := levenshtein(strings.ToLower(got), strings.ToLower(c)); d < bestD {
 			best, bestD = c, d
 		}
@@ -430,6 +453,8 @@ func didYouMean(got string, candidates []string) string {
 	return best
 }
 
+// levenshtein assumes both inputs are already length-bounded by
+// didYouMean — it is not exported and has no other caller.
 func levenshtein(a, b string) int {
 	ra, rb := []rune(a), []rune(b)
 	prev := make([]int, len(rb)+1)

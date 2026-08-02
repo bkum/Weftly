@@ -36,7 +36,7 @@ system keeps its meaning.
 | `enum` | `values` (required) | Exact match; near-misses get a did-you-mean |
 | `duration` | `min`, `max` | Go syntax (`30s`, `5m`, `1h30m`) |
 | `json` | — | Parsed to a real object in expressions |
-| `path` | `must_exist` | Fails at resolution, not at the step that opens the file |
+| `path` | `must_exist` | Confined to the run workspace or the workflow's own tree; `must_exist` fails at resolution, not at the step that opens the file |
 | `list` | `items`, `min_items`, `max_items` | JSON array, or comma-separated on the CLI |
 
 `secret:` is a **flag, not a type** — a secret can be a constrained
