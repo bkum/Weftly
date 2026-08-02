@@ -196,8 +196,16 @@ steps: [{id: s, run: echo}]`)
 	if err != nil {
 		t.Fatalf("a workspace-relative path should be allowed: %v", err)
 	}
-	if got := out["p"].(string); !strings.HasPrefix(got, ws) {
-		t.Errorf("expected a path under the workspace, got %q", got)
+	// Compare against the CANONICAL workspace. resolvePathInput returns
+	// a symlink-resolved path, and on macOS t.TempDir() hands back
+	// /var/... while the resolved form is /private/var/... — comparing
+	// against the raw TempDir would fail on a correct result.
+	canonWS := ws
+	if r, err := filepath.EvalSymlinks(ws); err == nil {
+		canonWS = r
+	}
+	if got := out["p"].(string); !strings.HasPrefix(got, canonWS) {
+		t.Errorf("expected a path under the workspace %q, got %q", canonWS, got)
 	}
 
 	// Inside the workflow's tree: allowed, so a library can reach its

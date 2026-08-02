@@ -236,14 +236,13 @@ func resolvePathInput(p string, mustExist bool, opts ResolveOptions) (string, st
 			roots = append(roots, canonicalPath(abs))
 		}
 	}
-	// No roots configured (bare-struct tests) — nothing to confine
-	// against, so pass the value through rather than reject everything.
+	// No roots configured — only reachable from bare-struct construction
+	// in tests, since engine.Run always supplies a workspace. Pass the
+	// value through unresolved and, crucially, do NOT stat it: with no
+	// root to confine against there is nothing to make the access safe,
+	// and a must_exist probe here would be precisely the unconstrained
+	// filesystem read this function exists to prevent.
 	if len(roots) == 0 {
-		if mustExist {
-			if _, err := os.Stat(p); err != nil {
-				return "", fmt.Sprintf("path %q does not exist (must_exist: true)", p)
-			}
-		}
 		return p, ""
 	}
 
@@ -260,30 +259,33 @@ func resolvePathInput(p string, mustExist bool, opts ResolveOptions) (string, st
 		return "", fmt.Sprintf("path %q could not be resolved: %v", p, err)
 	}
 	abs = canonicalPath(abs)
-	confined := false
 	for _, root := range roots {
 		rel, rerr := filepath.Rel(root, abs)
 		if rerr != nil {
 			continue
 		}
-		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			confined = true
-			break
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue // escapes this root; try the next
 		}
-	}
-	if !confined {
-		return "", fmt.Sprintf("path %q resolves outside the run workspace and the workflow directory", p)
-	}
-	// Past this point abs is proven to sit under one of the permitted
-	// roots, so touching it is safe. Failing here rather than at the
-	// step that opens the file means a missing profile registry names
-	// the input instead of surfacing as a shell error four steps later.
-	if mustExist {
-		if _, err := os.Stat(abs); err != nil {
-			return "", fmt.Sprintf("path %q does not exist (must_exist: true)", p)
+		// Re-anchor onto the root rather than carrying the
+		// caller-derived absolute path forward. `rel` has been proven
+		// not to climb out, so Join can only produce something inside
+		// `root` — the result is constructed from a trusted base plus a
+		// verified-relative remainder, which is both the clearer
+		// intent and the shape a taint analyser can follow.
+		safe := filepath.Join(root, rel)
+		if mustExist {
+			// Safe to touch now: `safe` is inside a permitted root.
+			// Failing here rather than at the step that opens the file
+			// means a missing profile registry names the input instead
+			// of surfacing as a shell error four steps later.
+			if _, err := os.Stat(safe); err != nil {
+				return "", fmt.Sprintf("path %q does not exist (must_exist: true)", p)
+			}
 		}
+		return safe, ""
 	}
-	return abs, ""
+	return "", fmt.Sprintf("path %q resolves outside the run workspace and the workflow directory", p)
 }
 
 // canonicalPath resolves symlinks as far as the path actually exists,
