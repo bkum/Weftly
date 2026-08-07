@@ -344,13 +344,19 @@ and URLs rejected; symlinks resolved *before* the confinement check;
 
 Tracked so the gap is explicit rather than discovered.
 
+Every row here is a **gap inside a shipped surface**, not a missing
+command. Where a row names a command that exists, the command works —
+the row describes the part of its behaviour that doesn't. Things Weftly
+deliberately will not do are in §11, not here.
+
 | Item | Why it matters |
 |---|---|
 | `type: path` outputs | Path outputs crossing an include boundary are not rebased automatically |
 | `$WEFTLY_OUTPUT_JSON` / `outputs_from:` | `Outputs` is already `map[string]any`, but a `run` step can only emit `key=value` strings |
 | `prompt` type-driven selection | An unresolved typed input could pick its own prompt shape (`enum` → select, `bool` → confirm); today the workflow must declare the prompt |
 | `schedules.yaml` input validation at load | A schedule with a bad input value fails at fire time, not at load |
-| `import-gha` input translation | GHA `type: choice`/`boolean`/`number` are still flattened to strings |
+| `import-gha` — `workflow_dispatch` inputs | The command ships (§6); this is a gap in it. `on:` is dropped wholesale and `workflow_dispatch.inputs` goes with it, so a converted workflow can reference `${{ inputs.x }}` while declaring no `inputs:` block. Expressions tolerate undefined variables, so it substitutes empty rather than failing. GHA `type: choice`/`boolean`/`number` now have obvious targets (`enum`+`values` / `bool` / `number`) |
+| Undeclared input references | A step may reference `${{ inputs.x }}` for an input the workflow never declares; it resolves empty rather than failing validation. Affects hand-written workflows too, not just converted ones |
 | Per-iteration `for-each` resume | See §5 |
 | `weftly schema` / `docs` / `test` | Adoption tooling |
 | Run diffing | `weftly diff` compares *workflows*; comparing two *runs* is not implemented |
@@ -359,9 +365,11 @@ Tracked so the gap is explicit rather than discovered.
 
 ## 11. Explicit non-goals
 
-- **Runtime multi-format parsing.** `import-gha` is a compile-time
-  convert-and-review seam, not a GHA-compatible runtime. Converted
-  workflows are ordinary Weftly YAML thereafter.
+- **Runtime multi-format parsing.** Weftly will not *execute* GitHub
+  Actions workflows natively. `weftly import-gha` **is implemented** and
+  converts one once, for review; the output is ordinary Weftly YAML from
+  then on. The non-goal is the runtime, not the converter — see §10 for
+  the converter's own gaps.
 - **Remote / URL includes.** An include is a reviewed dependency; a URL
   makes a reviewed workflow a moving target. Would require digest
   pinning to reconsider.
